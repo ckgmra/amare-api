@@ -45,7 +45,7 @@ steps:
       - '--max-instances'
       - '10'
       - '--set-env-vars'
-      - '^@^NODE_ENV=production@GCP_PROJECT_ID=watchful-force-477418-b9@CORS_ORIGINS=http://www.havetherelationshipyouwant.com,https://www.catchhimandkeephim.com,https://www.heartsintrueharmony.com,https://www.flourishtogether.com'
+      - '^@^NODE_ENV=production@GCP_PROJECT_ID=watchful-force-477418-b9@CORS_ORIGINS=https://www.havetherelationshipyouwant.com,https://www.catchhimandkeephim.com,https://www.heartsintrueharmony.com,https://www.flourishtogether.com'
       - '--set-secrets'
       - 'KEAP_CLIENT_ID=KEAP_CLIENT_ID:latest,KEAP_CLIENT_SECRET=KEAP_CLIENT_SECRET:latest,KEAP_REFRESH_TOKEN=KEAP_REFRESH_TOKEN:latest,CLICKBANK_SECRET_KEY=CLICKBANK_SECRET_KEY:latest'
 
