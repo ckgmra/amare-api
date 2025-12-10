@@ -261,7 +261,7 @@ CREATE TABLE keap_integration.clickbank_ipn_log (
    gcloud run services update amare-api \
      --region=us-central1 \
      --set-secrets="KEAP_CLIENT_ID=KEAP_CLIENT_ID:latest,KEAP_CLIENT_SECRET=KEAP_CLIENT_SECRET:latest,KEAP_REFRESH_TOKEN=KEAP_REFRESH_TOKEN:latest,CLICKBANK_SECRET_KEY=CLICKBANK_SECRET_KEY:latest" \
-     --set-env-vars="GCP_PROJECT_ID=watchful-force-477418-b9,CORS_ORIGINS=https://chkh.com,https://hryw.com"
+     --set-env-vars="GCP_PROJECT_ID=watchful-force-477418-b9,CORS_ORIGINS=http://www.havetherelationshipyouwant.com,https://www.catchhimandkeephim.com,https://www.heartsintrueharmony.com,https://www.flourishtogether.com"
    ```
 
 ### Manual Deployment
