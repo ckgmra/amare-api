@@ -123,7 +123,7 @@ class BigQueryClient {
   async updateSubscriberStatus(
     id: string,
     keapContactId: number | null,
-    tagsApplied: number[],
+    tagsApplied: string[],
     error: string | null
   ): Promise<void> {
     try {
@@ -302,9 +302,11 @@ class BigQueryClient {
         { name: 'redirect_slug', type: 'STRING', mode: 'NULLABLE' },
         { name: 'source_url', type: 'STRING', mode: 'NULLABLE' },
         { name: 'user_agent', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'raw_payload', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'tag_name', type: 'STRING', mode: 'NULLABLE' },
         { name: 'is_processed', type: 'BOOLEAN', mode: 'REQUIRED' },
         { name: 'keap_contact_id', type: 'INTEGER', mode: 'NULLABLE' },
-        { name: 'tags_applied', type: 'INTEGER', mode: 'REPEATED' },
+        { name: 'tags_applied', type: 'STRING', mode: 'REPEATED' },
         { name: 'processing_error', type: 'STRING', mode: 'NULLABLE' },
         { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
         { name: 'processed_at', type: 'TIMESTAMP', mode: 'NULLABLE' },

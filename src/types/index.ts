@@ -81,11 +81,13 @@ export interface SubscriberQueueEntry {
   dp_first_upload_time: string | null; // → DP_FIRST_UPLOAD_TIME_{BRAND}
   dp_optional_inputs: string | null;   // → DP_OPTIONAL_INPUTS_{BRAND}
   redirect_slug: string | null;
-  source_url: string | null;           // from Referer header
+  source_url: string | null;           // Original page URL where form was submitted
   user_agent: string | null;           // from User-Agent header
+  raw_payload: string | null;          // Full JSON payload for debugging
+  tag_name: string | null;             // Keap tag name to apply (e.g., "HRYW-WebSub")
   is_processed: boolean;
   keap_contact_id: number | null;
-  tags_applied: number[];
+  tags_applied: string[];              // Tag names that were applied
   processing_error: string | null;
   created_at: string;
   processed_at: string | null;

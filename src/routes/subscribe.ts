@@ -27,6 +27,7 @@ interface SubscribeBody {
   brand: string;
   tag: string;
   customFields?: Record<string, string>;
+  sourceUrl?: string;
 }
 
 interface SubscribeResponse {
@@ -52,6 +53,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
               additionalProperties: { type: 'string' },
               description: 'Keap custom fields (field name → value)',
             },
+            sourceUrl: { type: 'string', description: 'Original page URL where form was submitted' },
           },
         },
         response: {
@@ -101,7 +103,10 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        const { email, firstName, brand, tag, customFields } = request.body;
+        const { email, firstName, brand, tag, customFields, sourceUrl } = request.body;
+
+        // Store raw payload for debugging
+        const rawPayload = JSON.stringify(request.body);
 
         // Validate required fields
         if (!email || !firstName || !brand || !tag) {
@@ -124,7 +129,8 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
         const ipAddress = Array.isArray(forwardedFor)
           ? forwardedFor[0]
           : forwardedFor?.split(',')[0]?.trim() || request.ip;
-        const sourceUrl = (request.headers['referer'] as string) || null;
+        // Use sourceUrl from body (passed from frontend) or fall back to referer header
+        const resolvedSourceUrl = sourceUrl || (request.headers['referer'] as string) || null;
         const userAgent = (request.headers['user-agent'] as string) || null;
         const now = new Date().toISOString();
 
@@ -139,8 +145,10 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
           dp_first_upload_time: customFields?.['DP_FIRST_UPLOAD_TIME_' + brand.toUpperCase()] || now,
           dp_optional_inputs: customFields?.['DP_OPTIONAL_INPUTS_' + brand.toUpperCase()] || null,
           redirect_slug: null, // Not used - redirect handled by client
-          source_url: sourceUrl,
+          source_url: resolvedSourceUrl,
           user_agent: userAgent,
+          raw_payload: rawPayload,
+          tag_name: tag,
           is_processed: false,
           keap_contact_id: null,
           tags_applied: [],
@@ -160,6 +168,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
         // Now attempt to process immediately
         let contactId: number | null = null;
         let processingError: string | null = null;
+        let tagsApplied: string[] = [];
 
         try {
           // Create or update contact in Keap with custom fields passed through
@@ -172,6 +181,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
 
           // Apply the tag by name
           await keapClient.applyTagByName(contact.id, tag);
+          tagsApplied = [tag];
 
           reqLogger.info(
             { contactId, tag },
@@ -190,7 +200,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
         await bigQueryClient.updateSubscriberStatus(
           queueEntry.id,
           contactId,
-          [], // Tag IDs not used since we apply by name
+          tagsApplied,
           processingError
         );
 
