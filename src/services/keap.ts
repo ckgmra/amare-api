@@ -284,6 +284,12 @@ class KeapClient {
       // Convert field names to field IDs
       const customFieldsArray = await this.convertFieldNamesToIds(customFields);
 
+      logger.info({
+        inputFields: Object.keys(customFields),
+        mappedFields: customFieldsArray,
+        existingContactId: existingContact?.id
+      }, 'Preparing contact data');
+
       const contactData: Record<string, unknown> = {
         email_addresses: [{ email: email, field: 'EMAIL1' }],
         given_name: firstName,
@@ -293,6 +299,8 @@ class KeapClient {
       if (customFieldsArray.length > 0) {
         contactData.custom_fields = customFieldsArray;
       }
+
+      logger.info({ contactData }, 'Sending to Keap');
 
       if (existingContact) {
         const response = await this.axiosInstance.patch(
