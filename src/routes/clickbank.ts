@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { Logger } from 'pino';
+import { v4 as uuidv4 } from 'uuid';
 import {
   decryptClickbankNotification,
   isEncryptedFormat,
@@ -167,6 +168,12 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
       }
 
       await bigQueryClient.logIpn(ipnLogEntry);
+
+      // After processing current IPN, try to retry any failed transactions
+      retryFailedTransactions(reqLogger).catch((err) => {
+        reqLogger.error({ error: err }, 'Failed to retry transactions');
+      });
+
       return reply.status(200).send('OK');
     } catch (error) {
       reqLogger.error({ error }, 'ClickBank IPN processing error');
@@ -182,11 +189,12 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
  * Process a Clickbank transaction (SALE, RFND, CGBK, REBILL)
  *
  * Flow:
- * 1. Query tag actions for product + transaction type
- * 2. Find or create contact in Keap (with CB_Customer fields)
- * 3. Apply tags (APPLY actions)
- * 4. Remove tags (REMOVE actions)
- * 5. Log transaction to BigQuery
+ * 1. Queue transaction to BigQuery first (never lose data)
+ * 2. Query tag actions for product + transaction type
+ * 3. Find or create contact in Keap (with CB_Customer fields)
+ * 4. Apply tags (APPLY actions)
+ * 5. Remove tags (REMOVE actions)
+ * 6. Update transaction status in BigQuery
  */
 async function processTransaction(
   reqLogger: Logger,
@@ -207,8 +215,12 @@ async function processTransaction(
     transactionTime,
   } = ipnData;
 
-  // Initialize transaction record
+  const now = new Date().toISOString();
+  const transactionId = uuidv4();
+
+  // Initialize transaction record (queue first, process second)
   const transaction: ClickbankTransaction = {
+    id: transactionId,
     receipt: receipt,
     email: email || '',
     first_name: firstName || null,
@@ -222,104 +234,155 @@ async function processTransaction(
     keap_contact_id: null,
     tags_applied: [],
     tags_removed: [],
-    processed_at: new Date().toISOString(),
-    processing_status: 'SUCCESS',
+    is_processed: false,
+    created_at: now,
+    processed_at: null,
+    processing_status: 'PENDING',
     error_message: null,
     brand: vendor,
   };
 
+  // Validate email
+  if (!email) {
+    reqLogger.warn({ receipt }, 'No email in IPN data');
+    transaction.is_processed = true;
+    transaction.processed_at = now;
+    transaction.processing_status = 'FAILED';
+    transaction.error_message = 'No email in IPN data';
+    ipnLogEntry.processing_status = 'no_email';
+    ipnLogEntry.processing_error = 'No email in IPN data';
+    await bigQueryClient.logTransaction(transaction);
+    return;
+  }
+
+  // Validate product ID
+  if (!productId) {
+    reqLogger.warn({ receipt }, 'No product ID in IPN data');
+    transaction.is_processed = true;
+    transaction.processed_at = now;
+    transaction.processing_status = 'FAILED';
+    transaction.error_message = 'No product ID in IPN data';
+    ipnLogEntry.processing_status = 'no_product';
+    ipnLogEntry.processing_error = 'No product ID in IPN data';
+    await bigQueryClient.logTransaction(transaction);
+    return;
+  }
+
+  // Queue to BigQuery first (ensures we never lose a transaction)
+  await bigQueryClient.logTransaction(transaction);
+  reqLogger.info({ transactionId, receipt }, 'Transaction queued');
+
+  // Now attempt to process immediately
+  await processQueuedTransaction(reqLogger, transaction, ipnLogEntry);
+}
+
+/**
+ * Process a queued transaction (used for both new and retry)
+ */
+async function processQueuedTransaction(
+  reqLogger: Logger,
+  transaction: ClickbankTransaction,
+  ipnLogEntry?: IpnLogEntry
+): Promise<void> {
+  const { id, receipt, email, first_name, last_name, product_id, transaction_type } = transaction;
+
+  let contactId: number | null = null;
+  let tagsApplied: number[] = [];
+  let tagsRemoved: number[] = [];
+  let errorMessage: string | null = null;
+
   try {
-    // Validate email
-    if (!email) {
-      reqLogger.warn({ receipt }, 'No email in IPN data');
-      transaction.processing_status = 'FAILED';
-      transaction.error_message = 'No email in IPN data';
-      ipnLogEntry.processing_status = 'no_email';
-      ipnLogEntry.processing_error = 'No email in IPN data';
-      await bigQueryClient.logTransaction(transaction);
-      return;
-    }
-
-    // Validate product ID
-    if (!productId) {
-      reqLogger.warn({ receipt }, 'No product ID in IPN data');
-      transaction.processing_status = 'FAILED';
-      transaction.error_message = 'No product ID in IPN data';
-      ipnLogEntry.processing_status = 'no_product';
-      ipnLogEntry.processing_error = 'No product ID in IPN data';
-      await bigQueryClient.logTransaction(transaction);
-      return;
-    }
-
     // Get tag actions for this product + transaction type
-    const tagActions = await bigQueryClient.getTagActionsForProduct(productId, transactionType);
+    const tagActions = await bigQueryClient.getTagActionsForProduct(product_id, transaction_type);
 
-    const tagsToApply = tagActions.filter((t) => t.action === 'APPLY').map((t) => t.tagId);
-    const tagsToRemove = tagActions.filter((t) => t.action === 'REMOVE').map((t) => t.tagId);
+    tagsApplied = tagActions.filter((t) => t.action === 'APPLY').map((t) => t.tagId);
+    tagsRemoved = tagActions.filter((t) => t.action === 'REMOVE').map((t) => t.tagId);
 
     if (tagActions.length === 0) {
-      reqLogger.warn({ productId, transactionType }, 'No tag actions configured');
-      transaction.processing_status = 'NO_TAGS';
-      transaction.error_message = `No tags configured for ${productId}/${transactionType}`;
-      ipnLogEntry.processing_status = 'no_tags';
-      ipnLogEntry.processing_error = `No tags for ${productId}/${transactionType}`;
+      reqLogger.warn({ product_id, transaction_type }, 'No tag actions configured');
+      if (ipnLogEntry) {
+        ipnLogEntry.processing_status = 'no_tags';
+        ipnLogEntry.processing_error = `No tags for ${product_id}/${transaction_type}`;
+      }
     }
 
-    // Find or create contact in Keap (sets CB_Customer, CB_Last_Purchase_Date, CB_Last_Order_ID)
+    // Find or create contact in Keap
     const contact = await keapClient.findOrCreateClickbankContact(
       email,
-      firstName || '',
-      lastName || '',
+      first_name || '',
+      last_name || '',
       receipt,
-      transactionTime || null
+      transaction.clickbank_timestamp
     );
 
-    transaction.keap_contact_id = contact.id;
+    contactId = contact.id;
 
     // Apply tags
-    if (tagsToApply.length > 0) {
-      await keapClient.applyTags(contact.id, tagsToApply);
-      transaction.tags_applied = tagsToApply;
-      reqLogger.info({ contactId: contact.id, tags: tagsToApply }, 'Tags applied');
+    if (tagsApplied.length > 0) {
+      await keapClient.applyTags(contact.id, tagsApplied);
+      reqLogger.info({ contactId: contact.id, tags: tagsApplied }, 'Tags applied');
     }
 
     // Remove tags
-    if (tagsToRemove.length > 0) {
-      await keapClient.removeTags(contact.id, tagsToRemove);
-      transaction.tags_removed = tagsToRemove;
-      reqLogger.info({ contactId: contact.id, tags: tagsToRemove }, 'Tags removed');
+    if (tagsRemoved.length > 0) {
+      await keapClient.removeTags(contact.id, tagsRemoved);
+      reqLogger.info({ contactId: contact.id, tags: tagsRemoved }, 'Tags removed');
     }
 
-    // Update IPN log entry
-    ipnLogEntry.processing_status = transaction.processing_status === 'NO_TAGS' ? 'no_tags' : 'success';
-    ipnLogEntry.tags_applied = JSON.stringify({
-      applied: tagsToApply,
-      removed: tagsToRemove,
-    });
-
-    // Log transaction to BigQuery
-    await bigQueryClient.logTransaction(transaction);
+    // Update IPN log entry if provided
+    if (ipnLogEntry) {
+      ipnLogEntry.processing_status = tagActions.length === 0 ? 'no_tags' : 'success';
+      ipnLogEntry.tags_applied = JSON.stringify({
+        applied: tagsApplied,
+        removed: tagsRemoved,
+      });
+    }
 
     reqLogger.info(
       {
+        transactionId: id,
         receipt,
-        contactId: contact.id,
-        tagsApplied: tagsToApply,
-        tagsRemoved: tagsToRemove,
-        affiliate,
+        contactId,
+        tagsApplied,
+        tagsRemoved,
       },
       'Transaction processed successfully'
     );
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    reqLogger.error({ error, receipt, email, productId }, 'Failed to process transaction');
+    errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    reqLogger.error({ error, transactionId: id, receipt, email }, 'Failed to process transaction');
 
-    transaction.processing_status = 'FAILED';
-    transaction.error_message = errorMessage;
-    ipnLogEntry.processing_status = 'keap_error';
-    ipnLogEntry.processing_error = errorMessage;
+    if (ipnLogEntry) {
+      ipnLogEntry.processing_status = 'keap_error';
+      ipnLogEntry.processing_error = errorMessage;
+    }
+  }
 
-    await bigQueryClient.logTransaction(transaction);
+  // Update transaction status in BigQuery
+  await bigQueryClient.updateTransactionStatus(
+    id,
+    contactId,
+    tagsApplied,
+    tagsRemoved,
+    errorMessage
+  );
+}
+
+/**
+ * Retry failed transactions (triggered by new IPNs)
+ */
+async function retryFailedTransactions(reqLogger: Logger): Promise<void> {
+  const unprocessed = await bigQueryClient.getUnprocessedTransactions(10);
+
+  if (unprocessed.length === 0) {
+    return;
+  }
+
+  reqLogger.info({ count: unprocessed.length }, 'Retrying unprocessed transactions');
+
+  for (const transaction of unprocessed) {
+    reqLogger.info({ transactionId: transaction.id, receipt: transaction.receipt }, 'Retrying transaction');
+    await processQueuedTransaction(reqLogger, transaction);
   }
 }
 
@@ -330,7 +393,9 @@ async function logSkippedTransaction(
   ipnData: ClickbankIpnDecrypted,
   vendor: string
 ): Promise<void> {
+  const now = new Date().toISOString();
   const transaction: ClickbankTransaction = {
+    id: uuidv4(),
     receipt: ipnData.receipt,
     email: ipnData.email || '',
     first_name: ipnData.firstName || null,
@@ -344,7 +409,9 @@ async function logSkippedTransaction(
     keap_contact_id: null,
     tags_applied: [],
     tags_removed: [],
-    processed_at: new Date().toISOString(),
+    is_processed: true, // Skipped transactions are considered "processed"
+    created_at: now,
+    processed_at: now,
     processing_status: 'SKIPPED',
     error_message: null,
     brand: vendor,

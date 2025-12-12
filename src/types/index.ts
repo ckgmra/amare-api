@@ -111,6 +111,7 @@ export interface SubscriberQueueEntry {
 
 // Clickbank transaction record for BigQuery
 export interface ClickbankTransaction {
+  id: string;
   receipt: string;
   email: string;
   first_name: string | null;
@@ -124,8 +125,10 @@ export interface ClickbankTransaction {
   keap_contact_id: number | null;
   tags_applied: number[];
   tags_removed: number[];
-  processed_at: string;
-  processing_status: 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'NO_TAGS';
+  is_processed: boolean;
+  created_at: string;
+  processed_at: string | null;
+  processing_status: 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'NO_TAGS' | 'PENDING';
   error_message: string | null;
   brand: string;
 }

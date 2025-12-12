@@ -194,6 +194,67 @@ class BigQueryClient {
     }
   }
 
+  /**
+   * Get unprocessed transactions for retry processing
+   */
+  async getUnprocessedTransactions(limit: number = 100): Promise<ClickbankTransaction[]> {
+    try {
+      const query = `
+        SELECT *
+        FROM \`${this.projectId}.${this.dataset}.${this.transactionsTable}\`
+        WHERE is_processed = false
+        ORDER BY created_at ASC
+        LIMIT @limit
+      `;
+
+      const [rows] = await this.client.query({
+        query,
+        params: { limit },
+      });
+
+      return rows as ClickbankTransaction[];
+    } catch (error) {
+      logger.error({ error }, 'Failed to get unprocessed transactions');
+      return [];
+    }
+  }
+
+  /**
+   * Update transaction status after processing
+   */
+  async updateTransactionStatus(
+    id: string,
+    keapContactId: number | null,
+    tagsApplied: number[],
+    tagsRemoved: number[],
+    error: string | null
+  ): Promise<void> {
+    try {
+      const query = `
+        UPDATE \`${this.projectId}.${this.dataset}.${this.transactionsTable}\`
+        SET is_processed = true,
+            keap_contact_id = @keapContactId,
+            tags_applied = @tagsApplied,
+            tags_removed = @tagsRemoved,
+            processing_status = @status,
+            error_message = @error,
+            processed_at = CURRENT_TIMESTAMP()
+        WHERE id = @id
+      `;
+
+      const status = error ? 'FAILED' : 'SUCCESS';
+
+      await this.client.query({
+        query,
+        params: { id, keapContactId, tagsApplied, tagsRemoved, status, error },
+      });
+
+      logger.info({ id, keapContactId, success: !error }, 'Transaction status updated');
+    } catch (err) {
+      logger.error({ error: err, id }, 'Failed to update transaction status');
+    }
+  }
+
   async ensureTablesExist(): Promise<void> {
     try {
       const dataset = this.client.dataset(this.dataset);
@@ -238,6 +299,7 @@ class BigQueryClient {
 
       // Transactions table schema (main transaction log)
       const transactionsSchema = [
+        { name: 'id', type: 'STRING', mode: 'REQUIRED' },
         { name: 'receipt', type: 'STRING', mode: 'REQUIRED' },
         { name: 'email', type: 'STRING', mode: 'REQUIRED' },
         { name: 'first_name', type: 'STRING', mode: 'NULLABLE' },
@@ -251,7 +313,9 @@ class BigQueryClient {
         { name: 'keap_contact_id', type: 'INTEGER', mode: 'NULLABLE' },
         { name: 'tags_applied', type: 'INTEGER', mode: 'REPEATED' },
         { name: 'tags_removed', type: 'INTEGER', mode: 'REPEATED' },
-        { name: 'processed_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
+        { name: 'is_processed', type: 'BOOLEAN', mode: 'REQUIRED' },
+        { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
+        { name: 'processed_at', type: 'TIMESTAMP', mode: 'NULLABLE' },
         { name: 'processing_status', type: 'STRING', mode: 'NULLABLE' },
         { name: 'error_message', type: 'STRING', mode: 'NULLABLE' },
         { name: 'brand', type: 'STRING', mode: 'REQUIRED' },
@@ -302,10 +366,10 @@ class BigQueryClient {
           schema: transactionsSchema,
           timePartitioning: {
             type: 'DAY',
-            field: 'processed_at',
+            field: 'created_at',
           },
           clustering: {
-            fields: ['brand', 'product_id', 'transaction_type'],
+            fields: ['brand', 'product_id', 'is_processed'],
           },
         });
         logger.info({ table: this.transactionsTable }, 'Created transactions table');
