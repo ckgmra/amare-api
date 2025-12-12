@@ -8,11 +8,7 @@ import {
 } from '../services/clickbank.js';
 import { keapClient } from '../services/keap.js';
 import { bigQueryClient } from '../services/bigquery.js';
-import type {
-  ClickbankIpnDecrypted,
-  IpnLogEntry,
-  ClickbankTransaction,
-} from '../types/index.js';
+import type { ClickbankIpnDecrypted, ClickbankTransaction } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 interface LegacyIpnBody {
@@ -47,30 +43,14 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
   fastify.post('/ipn/clickbank', async (request: FastifyRequest, reply: FastifyReply) => {
     const requestId = request.id;
     const reqLogger = logger.child({ requestId });
+    const now = new Date().toISOString();
+
+    const sourceIp =
+      (request.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || request.ip;
+    const userAgent = (request.headers['user-agent'] as string) || null;
 
     let ipnData: ClickbankIpnDecrypted | null = null;
     let isEncrypted = false;
-    const sourceIp =
-      (request.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || request.ip;
-    const userAgent = request.headers['user-agent'] || null;
-
-    // Initialize IPN log entry (raw logging)
-    const ipnLogEntry: IpnLogEntry = {
-      receipt: null,
-      transaction_type: null,
-      vendor: null,
-      email: null,
-      product_id: null,
-      raw_payload: null,
-      is_test: false,
-      is_encrypted: false,
-      source_ip: sourceIp,
-      user_agent: userAgent,
-      processing_status: 'unknown',
-      processing_error: null,
-      tags_applied: null,
-      created_at: new Date().toISOString(),
-    };
 
     try {
       const body = request.body;
@@ -78,13 +58,26 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
       // Check if this is encrypted v6.0+ format
       if (isEncryptedFormat(body)) {
         isEncrypted = true;
-        ipnLogEntry.is_encrypted = true;
         ipnData = decryptClickbankNotification(body);
 
         if (!ipnData) {
-          ipnLogEntry.processing_status = 'decryption_failed';
-          ipnLogEntry.processing_error = 'Failed to decrypt notification';
-          await bigQueryClient.logIpn(ipnLogEntry);
+          // Log decryption failure
+          const transaction = createTransaction({
+            receipt: '',
+            transactionType: 'UNKNOWN',
+            brand: '',
+            email: '',
+            productId: '',
+            rawPayload: JSON.stringify(body),
+            isTest: false,
+            isEncrypted: true,
+            sourceIp,
+            userAgent,
+            processingStatus: 'DECRYPTION_FAILED',
+            errorMessage: 'Failed to decrypt notification',
+            now,
+          });
+          await bigQueryClient.logTransaction(transaction);
           return reply.status(200).send('OK');
         }
       } else {
@@ -110,64 +103,129 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
       const transactionType = ipnData.transactionType;
       const vendor = ipnData.vendor?.toLowerCase() || '';
       const receipt = ipnData.receipt;
-      const email = ipnData.email;
-      const productId = ipnData.itemNo;
+      const email = ipnData.email || '';
+      const productId = ipnData.itemNo || '';
       const isTest = isTestTransaction(transactionType);
 
-      // Update IPN log entry
-      ipnLogEntry.receipt = receipt;
-      ipnLogEntry.transaction_type = transactionType;
-      ipnLogEntry.vendor = vendor;
-      ipnLogEntry.email = email || null;
-      ipnLogEntry.product_id = productId || null;
-      ipnLogEntry.is_test = isTest;
-      ipnLogEntry.raw_payload = JSON.stringify(ipnData);
-
       reqLogger.info(
-        {
-          receipt,
-          transactionType,
-          vendor,
-          productId,
-          email,
-          isEncrypted,
-          isTest,
-        },
+        { receipt, transactionType, vendor, productId, email, isEncrypted, isTest },
         'ClickBank IPN received'
       );
 
       // Handle TEST (ClickBank URL validation test - not TEST_SALE)
       if (transactionType === 'TEST') {
-        ipnLogEntry.processing_status = 'success';
-        await bigQueryClient.logIpn(ipnLogEntry);
+        const transaction = createTransaction({
+          receipt,
+          transactionType,
+          brand: vendor,
+          email,
+          productId,
+          rawPayload: JSON.stringify(ipnData),
+          isTest: true,
+          isEncrypted,
+          sourceIp,
+          userAgent,
+          processingStatus: 'TEST',
+          errorMessage: null,
+          now,
+          isProcessed: true,
+        });
+        await bigQueryClient.logTransaction(transaction);
         return reply.status(200).send('OK');
       }
 
       // Validate required fields
       if (!receipt || !transactionType) {
-        reqLogger.warn('Missing required fields in IPN');
-        ipnLogEntry.processing_status = 'validation_failed';
-        ipnLogEntry.processing_error = 'Missing required fields';
-        await bigQueryClient.logIpn(ipnLogEntry);
+        const transaction = createTransaction({
+          receipt: receipt || '',
+          transactionType: transactionType || 'UNKNOWN',
+          brand: vendor,
+          email,
+          productId,
+          rawPayload: JSON.stringify(ipnData),
+          isTest,
+          isEncrypted,
+          sourceIp,
+          userAgent,
+          processingStatus: 'VALIDATION_FAILED',
+          errorMessage: 'Missing required fields',
+          now,
+        });
+        await bigQueryClient.logTransaction(transaction);
         return reply.status(200).send('OK');
       }
 
-      // Process the transaction
+      // Build full transaction object
+      const transaction: ClickbankTransaction = {
+        id: uuidv4(),
+        receipt,
+        transaction_type: transactionType,
+        brand: vendor,
+        email,
+        first_name: ipnData.firstName || null,
+        last_name: ipnData.lastName || null,
+        product_id: productId,
+        amount: ipnData.totalOrderAmount || null,
+        currency: ipnData.currency || 'USD',
+        affiliate: ipnData.affiliate || null,
+        clickbank_timestamp: ipnData.transactionTime || null,
+        raw_payload: JSON.stringify(ipnData),
+        is_test: isTest,
+        is_encrypted: isEncrypted,
+        source_ip: sourceIp,
+        user_agent: userAgent,
+        is_processed: false,
+        keap_contact_id: null,
+        tags_applied: [],
+        tags_removed: [],
+        processing_status: 'PENDING',
+        error_message: null,
+        created_at: now,
+        processed_at: null,
+      };
+
+      // Process based on transaction type
       if (PROCESSABLE_TYPES.includes(transactionType)) {
-        await processTransaction(reqLogger, ipnData, vendor, ipnLogEntry);
+        // Validate email for processable transactions
+        if (!email) {
+          transaction.is_processed = true;
+          transaction.processed_at = now;
+          transaction.processing_status = 'FAILED';
+          transaction.error_message = 'No email in IPN data';
+          await bigQueryClient.logTransaction(transaction);
+          return reply.status(200).send('OK');
+        }
+
+        // Validate product ID
+        if (!productId) {
+          transaction.is_processed = true;
+          transaction.processed_at = now;
+          transaction.processing_status = 'FAILED';
+          transaction.error_message = 'No product ID in IPN data';
+          await bigQueryClient.logTransaction(transaction);
+          return reply.status(200).send('OK');
+        }
+
+        // Queue transaction first (never lose data)
+        await bigQueryClient.logTransaction(transaction);
+        reqLogger.info({ transactionId: transaction.id, receipt }, 'Transaction queued');
+
+        // Attempt to process immediately
+        await processQueuedTransaction(reqLogger, transaction);
       } else if (SKIP_TYPES.includes(transactionType)) {
+        transaction.is_processed = true;
+        transaction.processed_at = now;
+        transaction.processing_status = 'SKIPPED';
+        await bigQueryClient.logTransaction(transaction);
         reqLogger.info({ receipt, transactionType }, 'Transaction type skipped');
-        ipnLogEntry.processing_status = 'skipped';
-
-        // Still log to transactions table with SKIPPED status
-        await logSkippedTransaction(ipnData, vendor);
       } else {
+        transaction.is_processed = true;
+        transaction.processed_at = now;
+        transaction.processing_status = 'FAILED';
+        transaction.error_message = `Unknown transaction type: ${transactionType}`;
+        await bigQueryClient.logTransaction(transaction);
         reqLogger.warn({ transactionType }, 'Unknown transaction type');
-        ipnLogEntry.processing_status = 'unknown_type';
-        ipnLogEntry.processing_error = `Unknown type: ${transactionType}`;
       }
-
-      await bigQueryClient.logIpn(ipnLogEntry);
 
       // After processing current IPN, try to retry any failed transactions
       retryFailedTransactions(reqLogger).catch((err) => {
@@ -177,103 +235,73 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
       return reply.status(200).send('OK');
     } catch (error) {
       reqLogger.error({ error }, 'ClickBank IPN processing error');
-      ipnLogEntry.processing_status = 'exception';
-      ipnLogEntry.processing_error = error instanceof Error ? error.message : 'Unknown error';
-      await bigQueryClient.logIpn(ipnLogEntry);
+      const transaction = createTransaction({
+        receipt: ipnData?.receipt || '',
+        transactionType: ipnData?.transactionType || 'UNKNOWN',
+        brand: ipnData?.vendor?.toLowerCase() || '',
+        email: ipnData?.email || '',
+        productId: ipnData?.itemNo || '',
+        rawPayload: ipnData ? JSON.stringify(ipnData) : null,
+        isTest: false,
+        isEncrypted,
+        sourceIp,
+        userAgent,
+        processingStatus: 'FAILED',
+        errorMessage: error instanceof Error ? error.message : 'Unknown error',
+        now,
+      });
+      await bigQueryClient.logTransaction(transaction);
       return reply.status(200).send('OK');
     }
   });
 }
 
 /**
- * Process a Clickbank transaction (SALE, RFND, CGBK, REBILL)
- *
- * Flow:
- * 1. Queue transaction to BigQuery first (never lose data)
- * 2. Query tag actions for product + transaction type
- * 3. Find or create contact in Keap (with CB_Customer fields)
- * 4. Apply tags (APPLY actions)
- * 5. Remove tags (REMOVE actions)
- * 6. Update transaction status in BigQuery
+ * Helper to create a transaction record
  */
-async function processTransaction(
-  reqLogger: Logger,
-  ipnData: ClickbankIpnDecrypted,
-  vendor: string,
-  ipnLogEntry: IpnLogEntry
-): Promise<void> {
-  const {
-    receipt,
-    email,
-    firstName,
-    lastName,
-    itemNo: productId,
-    transactionType,
-    totalOrderAmount,
-    currency,
-    affiliate,
-    transactionTime,
-  } = ipnData;
-
-  const now = new Date().toISOString();
-  const transactionId = uuidv4();
-
-  // Initialize transaction record (queue first, process second)
-  const transaction: ClickbankTransaction = {
-    id: transactionId,
-    receipt: receipt,
-    email: email || '',
-    first_name: firstName || null,
-    last_name: lastName || null,
-    product_id: productId || '',
-    transaction_type: transactionType,
-    amount: totalOrderAmount || null,
-    currency: currency || 'USD',
-    affiliate: affiliate || null,
-    clickbank_timestamp: transactionTime || null,
+function createTransaction(opts: {
+  receipt: string;
+  transactionType: string;
+  brand: string;
+  email: string;
+  productId: string;
+  rawPayload: string | null;
+  isTest: boolean;
+  isEncrypted: boolean;
+  sourceIp: string;
+  userAgent: string | null;
+  processingStatus: ClickbankTransaction['processing_status'];
+  errorMessage: string | null;
+  now: string;
+  isProcessed?: boolean;
+}): ClickbankTransaction {
+  return {
+    id: uuidv4(),
+    receipt: opts.receipt,
+    transaction_type: opts.transactionType,
+    brand: opts.brand,
+    email: opts.email,
+    first_name: null,
+    last_name: null,
+    product_id: opts.productId,
+    amount: null,
+    currency: 'USD',
+    affiliate: null,
+    clickbank_timestamp: null,
+    raw_payload: opts.rawPayload,
+    is_test: opts.isTest,
+    is_encrypted: opts.isEncrypted,
+    source_ip: opts.sourceIp,
+    user_agent: opts.userAgent,
+    is_processed: opts.isProcessed ?? true,
     keap_contact_id: null,
     tags_applied: [],
     tags_removed: [],
-    is_processed: false,
-    created_at: now,
-    processed_at: null,
-    processing_status: 'PENDING',
-    error_message: null,
-    brand: vendor,
+    processing_status: opts.processingStatus,
+    error_message: opts.errorMessage,
+    created_at: opts.now,
+    processed_at: opts.isProcessed ?? true ? opts.now : null,
   };
-
-  // Validate email
-  if (!email) {
-    reqLogger.warn({ receipt }, 'No email in IPN data');
-    transaction.is_processed = true;
-    transaction.processed_at = now;
-    transaction.processing_status = 'FAILED';
-    transaction.error_message = 'No email in IPN data';
-    ipnLogEntry.processing_status = 'no_email';
-    ipnLogEntry.processing_error = 'No email in IPN data';
-    await bigQueryClient.logTransaction(transaction);
-    return;
-  }
-
-  // Validate product ID
-  if (!productId) {
-    reqLogger.warn({ receipt }, 'No product ID in IPN data');
-    transaction.is_processed = true;
-    transaction.processed_at = now;
-    transaction.processing_status = 'FAILED';
-    transaction.error_message = 'No product ID in IPN data';
-    ipnLogEntry.processing_status = 'no_product';
-    ipnLogEntry.processing_error = 'No product ID in IPN data';
-    await bigQueryClient.logTransaction(transaction);
-    return;
-  }
-
-  // Queue to BigQuery first (ensures we never lose a transaction)
-  await bigQueryClient.logTransaction(transaction);
-  reqLogger.info({ transactionId, receipt }, 'Transaction queued');
-
-  // Now attempt to process immediately
-  await processQueuedTransaction(reqLogger, transaction, ipnLogEntry);
 }
 
 /**
@@ -281,8 +309,7 @@ async function processTransaction(
  */
 async function processQueuedTransaction(
   reqLogger: Logger,
-  transaction: ClickbankTransaction,
-  ipnLogEntry?: IpnLogEntry
+  transaction: ClickbankTransaction
 ): Promise<void> {
   const { id, receipt, email, first_name, last_name, product_id, transaction_type } = transaction;
 
@@ -300,10 +327,6 @@ async function processQueuedTransaction(
 
     if (tagActions.length === 0) {
       reqLogger.warn({ product_id, transaction_type }, 'No tag actions configured');
-      if (ipnLogEntry) {
-        ipnLogEntry.processing_status = 'no_tags';
-        ipnLogEntry.processing_error = `No tags for ${product_id}/${transaction_type}`;
-      }
     }
 
     // Find or create contact in Keap
@@ -329,43 +352,17 @@ async function processQueuedTransaction(
       reqLogger.info({ contactId: contact.id, tags: tagsRemoved }, 'Tags removed');
     }
 
-    // Update IPN log entry if provided
-    if (ipnLogEntry) {
-      ipnLogEntry.processing_status = tagActions.length === 0 ? 'no_tags' : 'success';
-      ipnLogEntry.tags_applied = JSON.stringify({
-        applied: tagsApplied,
-        removed: tagsRemoved,
-      });
-    }
-
     reqLogger.info(
-      {
-        transactionId: id,
-        receipt,
-        contactId,
-        tagsApplied,
-        tagsRemoved,
-      },
+      { transactionId: id, receipt, contactId, tagsApplied, tagsRemoved },
       'Transaction processed successfully'
     );
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : 'Unknown error';
     reqLogger.error({ error, transactionId: id, receipt, email }, 'Failed to process transaction');
-
-    if (ipnLogEntry) {
-      ipnLogEntry.processing_status = 'keap_error';
-      ipnLogEntry.processing_error = errorMessage;
-    }
   }
 
   // Update transaction status in BigQuery
-  await bigQueryClient.updateTransactionStatus(
-    id,
-    contactId,
-    tagsApplied,
-    tagsRemoved,
-    errorMessage
-  );
+  await bigQueryClient.updateTransactionStatus(id, contactId, tagsApplied, tagsRemoved, errorMessage);
 }
 
 /**
@@ -384,38 +381,4 @@ async function retryFailedTransactions(reqLogger: Logger): Promise<void> {
     reqLogger.info({ transactionId: transaction.id, receipt: transaction.receipt }, 'Retrying transaction');
     await processQueuedTransaction(reqLogger, transaction);
   }
-}
-
-/**
- * Log a skipped transaction (CANCEL-REBILL, etc.)
- */
-async function logSkippedTransaction(
-  ipnData: ClickbankIpnDecrypted,
-  vendor: string
-): Promise<void> {
-  const now = new Date().toISOString();
-  const transaction: ClickbankTransaction = {
-    id: uuidv4(),
-    receipt: ipnData.receipt,
-    email: ipnData.email || '',
-    first_name: ipnData.firstName || null,
-    last_name: ipnData.lastName || null,
-    product_id: ipnData.itemNo || '',
-    transaction_type: ipnData.transactionType,
-    amount: ipnData.totalOrderAmount || null,
-    currency: ipnData.currency || 'USD',
-    affiliate: ipnData.affiliate || null,
-    clickbank_timestamp: ipnData.transactionTime || null,
-    keap_contact_id: null,
-    tags_applied: [],
-    tags_removed: [],
-    is_processed: true, // Skipped transactions are considered "processed"
-    created_at: now,
-    processed_at: now,
-    processing_status: 'SKIPPED',
-    error_message: null,
-    brand: vendor,
-  };
-
-  await bigQueryClient.logTransaction(transaction);
 }

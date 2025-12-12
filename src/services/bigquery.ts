@@ -1,5 +1,5 @@
 import { BigQuery } from '@google-cloud/bigquery';
-import type { IpnLogEntry, TagAction, ClickbankTransaction, SubscriberQueueEntry } from '../types/index.js';
+import type { TagAction, ClickbankTransaction, SubscriberQueueEntry } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 class BigQueryClient {
@@ -7,7 +7,6 @@ class BigQueryClient {
   private projectId: string;
   private dataset: string;
   private productTagsTable: string;
-  private ipnLogTable: string;
   private transactionsTable: string;
   private subscriberQueueTable: string;
 
@@ -15,7 +14,6 @@ class BigQueryClient {
     this.projectId = process.env.GCP_PROJECT_ID || 'watchful-force-477418-b9';
     this.dataset = process.env.BIGQUERY_DATASET || 'keap_integration';
     this.productTagsTable = process.env.BIGQUERY_TABLE_PRODUCT_TAGS || 'clickbank_product_tags';
-    this.ipnLogTable = process.env.BIGQUERY_TABLE_IPN_LOG || 'clickbank_ipn_log';
     this.transactionsTable =
       process.env.BIGQUERY_TABLE_TRANSACTIONS || 'clickbank_transactions';
     this.subscriberQueueTable =
@@ -93,25 +91,6 @@ class BigQueryClient {
         logger.error({ errors: bqError.errors }, 'BigQuery transaction insert errors');
       } else {
         logger.error({ error }, 'Failed to log transaction to BigQuery');
-      }
-    }
-  }
-
-  /**
-   * Log raw IPN data (for debugging/auditing)
-   */
-  async logIpn(entry: IpnLogEntry): Promise<void> {
-    try {
-      const tableRef = this.client.dataset(this.dataset).table(this.ipnLogTable);
-
-      await tableRef.insert([entry]);
-      logger.info({ receipt: entry.receipt }, 'IPN logged to BigQuery');
-    } catch (error) {
-      const bqError = error as { errors?: Array<{ errors: unknown[] }> };
-      if (bqError.errors) {
-        logger.error({ errors: bqError.errors }, 'BigQuery insert errors');
-      } else {
-        logger.error({ error }, 'Failed to log IPN to BigQuery');
       }
     }
   }
@@ -279,46 +258,35 @@ class BigQueryClient {
         { name: 'updated_at', type: 'TIMESTAMP', mode: 'NULLABLE' },
       ];
 
-      // IPN log table schema (raw IPN logging)
-      const ipnLogSchema = [
-        { name: 'receipt', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'transaction_type', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'vendor', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'email', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'product_id', type: 'STRING', mode: 'NULLABLE' },
+      // Transactions table schema (consolidated: audit log + processing queue)
+      const transactionsSchema = [
+        { name: 'id', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'receipt', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'transaction_type', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'brand', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'email', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'first_name', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'last_name', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'product_id', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'amount', type: 'NUMERIC', mode: 'NULLABLE' },
+        { name: 'currency', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'affiliate', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'clickbank_timestamp', type: 'TIMESTAMP', mode: 'NULLABLE' },
+        // Audit fields
         { name: 'raw_payload', type: 'STRING', mode: 'NULLABLE' },
         { name: 'is_test', type: 'BOOLEAN', mode: 'REQUIRED' },
         { name: 'is_encrypted', type: 'BOOLEAN', mode: 'REQUIRED' },
         { name: 'source_ip', type: 'STRING', mode: 'NULLABLE' },
         { name: 'user_agent', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'processing_status', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'processing_error', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'tags_applied', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
-      ];
-
-      // Transactions table schema (main transaction log)
-      const transactionsSchema = [
-        { name: 'id', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'receipt', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'email', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'first_name', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'last_name', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'product_id', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'transaction_type', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'amount', type: 'NUMERIC', mode: 'NULLABLE' },
-        { name: 'currency', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'affiliate', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'clickbank_timestamp', type: 'TIMESTAMP', mode: 'NULLABLE' },
+        // Processing queue fields
+        { name: 'is_processed', type: 'BOOLEAN', mode: 'REQUIRED' },
         { name: 'keap_contact_id', type: 'INTEGER', mode: 'NULLABLE' },
         { name: 'tags_applied', type: 'INTEGER', mode: 'REPEATED' },
         { name: 'tags_removed', type: 'INTEGER', mode: 'REPEATED' },
-        { name: 'is_processed', type: 'BOOLEAN', mode: 'REQUIRED' },
+        { name: 'processing_status', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'error_message', type: 'STRING', mode: 'NULLABLE' },
         { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
         { name: 'processed_at', type: 'TIMESTAMP', mode: 'NULLABLE' },
-        { name: 'processing_status', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'error_message', type: 'STRING', mode: 'NULLABLE' },
-        { name: 'brand', type: 'STRING', mode: 'REQUIRED' },
       ];
 
       // Subscriber queue table schema
@@ -348,14 +316,6 @@ class BigQueryClient {
       if (!productTagsExists) {
         await productTagsTableRef.create({ schema: productTagsSchema });
         logger.info({ table: this.productTagsTable }, 'Created product tags table');
-      }
-
-      // Create IPN log table if not exists
-      const ipnLogTableRef = dataset.table(this.ipnLogTable);
-      const [ipnLogExists] = await ipnLogTableRef.exists();
-      if (!ipnLogExists) {
-        await ipnLogTableRef.create({ schema: ipnLogSchema });
-        logger.info({ table: this.ipnLogTable }, 'Created IPN log table');
       }
 
       // Create transactions table if not exists

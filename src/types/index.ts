@@ -63,24 +63,6 @@ export interface ClickbankIpnDecrypted {
   [key: string]: unknown;
 }
 
-// Legacy IPN log entry (for raw IPN logging)
-export interface IpnLogEntry {
-  receipt: string | null;
-  transaction_type: string | null;
-  vendor: string | null;
-  email: string | null;
-  product_id: string | null;
-  raw_payload: string | null;
-  is_test: boolean;
-  is_encrypted: boolean;
-  source_ip: string | null;
-  user_agent: string | null;
-  processing_status: string;
-  processing_error: string | null;
-  tags_applied: string | null;
-  created_at: string;
-}
-
 // Tag action from BigQuery product_tags table
 export interface TagAction {
   action: 'APPLY' | 'REMOVE';
@@ -109,26 +91,33 @@ export interface SubscriberQueueEntry {
   processed_at: string | null;
 }
 
-// Clickbank transaction record for BigQuery
+// Clickbank transaction record for BigQuery (consolidated: audit log + processing queue)
 export interface ClickbankTransaction {
   id: string;
   receipt: string;
+  transaction_type: string;
+  brand: string;
   email: string;
   first_name: string | null;
   last_name: string | null;
   product_id: string;
-  transaction_type: string;
   amount: number | null;
   currency: string;
   affiliate: string | null;
   clickbank_timestamp: string | null;
+  // Audit fields
+  raw_payload: string | null;
+  is_test: boolean;
+  is_encrypted: boolean;
+  source_ip: string | null;
+  user_agent: string | null;
+  // Processing queue fields
+  is_processed: boolean;
   keap_contact_id: number | null;
   tags_applied: number[];
   tags_removed: number[];
-  is_processed: boolean;
+  processing_status: 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'NO_TAGS' | 'PENDING' | 'TEST' | 'DECRYPTION_FAILED' | 'VALIDATION_FAILED';
+  error_message: string | null;
   created_at: string;
   processed_at: string | null;
-  processing_status: 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'NO_TAGS' | 'PENDING';
-  error_message: string | null;
-  brand: string;
 }
