@@ -315,7 +315,14 @@ class KeapClient {
         return response.data;
       }
     } catch (error) {
-      logger.error({ error, email }, 'Failed to create/update contact with custom fields');
+      // Try to extract response body for better error info
+      const axiosError = error as { response?: { data?: unknown; status?: number } };
+      logger.error({
+        error,
+        email,
+        responseData: axiosError.response?.data,
+        responseStatus: axiosError.response?.status
+      }, 'Failed to create/update contact with custom fields');
       throw error;
     }
   }
