@@ -88,6 +88,27 @@ export interface TagAction {
   tagName?: string;
 }
 
+// Subscriber queue entry for BigQuery
+export interface SubscriberQueueEntry {
+  id: string;
+  email: string;
+  first_name: string;
+  brand: string;
+  dp_source_id: string | null;        // → DP_SOURCE_ID_{BRAND}
+  dp_ip_address: string | null;        // → DP_IP_ADDRESS (shared)
+  dp_first_upload_time: string | null; // → DP_FIRST_UPLOAD_TIME_{BRAND}
+  dp_optional_inputs: string | null;   // → DP_OPTIONAL_INPUTS_{BRAND}
+  redirect_slug: string | null;
+  source_url: string | null;           // from Referer header
+  user_agent: string | null;           // from User-Agent header
+  is_processed: boolean;
+  keap_contact_id: number | null;
+  tags_applied: number[];
+  processing_error: string | null;
+  created_at: string;
+  processed_at: string | null;
+}
+
 // Clickbank transaction record for BigQuery
 export interface ClickbankTransaction {
   receipt: string;

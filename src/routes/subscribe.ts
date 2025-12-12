@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { v4 as uuidv4 } from 'uuid';
 import { keapClient } from '../services/keap.js';
+import { bigQueryClient } from '../services/bigquery.js';
 import { getBrandConfig } from '../config/brands.js';
 import { buildCustomFields, SUPPORTED_BRANDS } from '../config/keapFields.js';
-import type { SubscribeResponse } from '../types/index.js';
+import type { SubscribeResponse, SubscriberQueueEntry } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -115,52 +117,96 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
           } satisfies SubscribeResponse);
         }
 
-        // Extract IP address from x-forwarded-for header (Cloud Run sets this)
+        // Extract request metadata
         const forwardedFor = request.headers['x-forwarded-for'];
         const ipAddress = Array.isArray(forwardedFor)
           ? forwardedFor[0]
           : forwardedFor?.split(',')[0]?.trim() || request.ip;
+        const sourceUrl = (request.headers['referer'] as string) || null;
+        const userAgent = (request.headers['user-agent'] as string) || null;
+        const now = new Date().toISOString();
 
-        // Build custom fields for Keap
-        // Field IDs are configured via environment variables (see src/config/keapFields.ts)
-        const customFields = buildCustomFields(brand, {
-          sourceId,
-          ipAddress,
-          optionalInputs,
-        });
+        // Create queue entry
+        const queueEntry: SubscriberQueueEntry = {
+          id: uuidv4(),
+          email: em,
+          first_name: fname,
+          brand: brand.toUpperCase(),
+          dp_source_id: sourceId || null,
+          dp_ip_address: ipAddress,
+          dp_first_upload_time: now,
+          dp_optional_inputs: optionalInputs || null,
+          redirect_slug: redirectSlug || null,
+          source_url: sourceUrl,
+          user_agent: userAgent,
+          is_processed: false,
+          keap_contact_id: null,
+          tags_applied: [],
+          processing_error: null,
+          created_at: now,
+          processed_at: null,
+        };
+
+        // Queue to BigQuery first (ensures we never lose a submission)
+        await bigQueryClient.queueSubscriber(queueEntry);
 
         reqLogger.info(
           {
+            queueId: queueEntry.id,
             email: em,
-            firstName: fname,
             brand: brandConfig.brandCode,
             sourceId,
             ipAddress,
-            customFieldsCount: customFields.length,
           },
-          'Processing subscribe request'
+          'Subscriber queued'
         );
 
-        // Create or update contact in Keap
-        const contact = await keapClient.createOrUpdateContact(em, fname, customFields);
+        // Now attempt to process immediately
+        let contactId: number | null = null;
+        let tagsApplied: number[] = [];
+        let processingError: string | null = null;
 
-        // Apply signup tags
-        if (brandConfig.signupTagIds.length > 0) {
-          await keapClient.applyTags(contact.id, brandConfig.signupTagIds);
+        try {
+          // Build custom fields for Keap (with brand suffix logic)
+          const customFields = buildCustomFields(brand, {
+            sourceId,
+            ipAddress,
+            optionalInputs,
+            firstUploadTime: now,
+          });
+
+          // Create or update contact in Keap
+          const contact = await keapClient.createOrUpdateContact(em, fname, customFields);
+          contactId = contact.id;
+
+          // Apply signup tags
+          if (brandConfig.signupTagIds.length > 0) {
+            await keapClient.applyTags(contact.id, brandConfig.signupTagIds);
+            tagsApplied = brandConfig.signupTagIds;
+          }
+
+          reqLogger.info(
+            { contactId, tagsApplied },
+            'Keap processing completed'
+          );
+        } catch (keapError) {
+          // Keap failed - subscriber is queued, will retry later
+          processingError = keapError instanceof Error ? keapError.message : 'Keap processing failed';
+          reqLogger.warn({ error: keapError, queueId: queueEntry.id }, 'Keap processing failed, subscriber queued for retry');
         }
+
+        // Update queue entry with processing result
+        await bigQueryClient.updateSubscriberStatus(
+          queueEntry.id,
+          contactId,
+          tagsApplied,
+          processingError
+        );
 
         // Build redirect URL
         const redirectUrl = redirectSlug || brandConfig.defaultRedirect;
 
-        reqLogger.info(
-          {
-            contactId: contact.id,
-            tagsApplied: brandConfig.signupTagIds,
-            redirectUrl,
-          },
-          'Subscribe completed successfully'
-        );
-
+        // Always return success to the user (their submission is saved)
         return reply.send({
           success: true,
           redirectUrl,

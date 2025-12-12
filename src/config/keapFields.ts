@@ -265,6 +265,7 @@ export function buildCustomFields(
     ipAddress?: string;
     subscriberIdEncoded?: string;
     optionalInputs?: string;
+    firstUploadTime?: string;
   }
 ): Array<{ id: number; content: string }> {
   const fieldIds = getKeapFieldIds();
@@ -290,12 +291,12 @@ export function buildCustomFields(
       customFields.push({ id: brandFields.subscriberIdEncoded, content: data.subscriberIdEncoded });
     }
 
-    if (brandFields.firstUploadTime) {
-      customFields.push({ id: brandFields.firstUploadTime, content: new Date().toISOString() });
+    if (brandFields.firstUploadTime && data.firstUploadTime) {
+      customFields.push({ id: brandFields.firstUploadTime, content: data.firstUploadTime });
     }
 
     if (brandFields.subscribeDate) {
-      customFields.push({ id: brandFields.subscribeDate, content: new Date().toISOString() });
+      customFields.push({ id: brandFields.subscribeDate, content: data.firstUploadTime || new Date().toISOString() });
     }
 
     if (brandFields.optionalInputs && data.optionalInputs) {
