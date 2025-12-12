@@ -365,6 +365,12 @@ class KeapClient {
     const result: Array<{ id: number; content: string }> = [];
 
     for (const [name, value] of Object.entries(fields)) {
+      // Skip empty values - Keap may reject them
+      if (!value || value.trim() === '') {
+        logger.debug({ fieldName: name }, 'Skipping empty field value');
+        continue;
+      }
+
       const fieldId = fieldMap.get(name);
       if (fieldId) {
         result.push({ id: fieldId, content: value });
