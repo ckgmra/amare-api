@@ -47,7 +47,7 @@ steps:
       - '--set-env-vars'
       - '^@^NODE_ENV=production@GCP_PROJECT_ID=watchful-force-477418-b9@CORS_ORIGINS=https://www.havetherelationshipyouwant.com,https://www.catchhimandkeephim.com,https://www.heartsintrueharmony.com,https://www.flourishtogether.com'
       - '--set-secrets'
-      - 'KEAP_CLIENT_ID=KEAP_CLIENT_ID:latest,KEAP_CLIENT_SECRET=KEAP_CLIENT_SECRET:latest,KEAP_REFRESH_TOKEN=KEAP_REFRESH_TOKEN:latest,CLICKBANK_SECRET_KEY=CLICKBANK_SECRET_KEY:latest'
+      - 'KEAP_CLIENT_ID=KEAP_CLIENT_ID:latest,KEAP_CLIENT_SECRET=KEAP_CLIENT_SECRET:latest,KEAP_REFRESH_TOKEN=KEAP_REFRESH_TOKEN:latest,CLICKBANK_SECRET_KEY=CLICKBANK_SECRET_KEY:latest,SUBSCRIBE_API_KEY=SUBSCRIBE_API_KEY:latest'
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/amare-api/amare-api:$COMMIT_SHA'
