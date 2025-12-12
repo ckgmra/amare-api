@@ -325,7 +325,10 @@ class KeapClient {
 
     try {
       const response = await this.axiosInstance.get('/contactCustomFields');
-      const fields = response.data.custom_fields || [];
+      // Keap API returns array directly, or may have custom_fields property
+      const fields = Array.isArray(response.data) ? response.data : (response.data.custom_fields || []);
+
+      logger.info({ rawFieldCount: fields.length, sampleField: fields[0] }, 'Fetched Keap custom fields');
 
       this.fieldNameToIdCache = new Map();
       for (const field of fields) {
