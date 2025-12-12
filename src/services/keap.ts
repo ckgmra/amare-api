@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import type { KeapContact, KeapTokenResponse } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
@@ -28,9 +29,15 @@ function parseFieldId(envVar: string): number | undefined {
 class KeapClient {
   private accessToken: string | null = null;
   private tokenExpiry: number = 0;
+  private currentRefreshToken: string | null = null;
   private axiosInstance: AxiosInstance;
+  private secretManagerClient: SecretManagerServiceClient;
+  private projectId: string;
 
   constructor() {
+    this.projectId = process.env.GCP_PROJECT_ID || 'watchful-force-477418-b9';
+    this.secretManagerClient = new SecretManagerServiceClient();
+
     this.axiosInstance = axios.create({
       baseURL: KEAP_API_BASE,
       headers: {
@@ -45,6 +52,33 @@ class KeapClient {
     });
   }
 
+  /**
+   * Save new refresh token to Secret Manager
+   * Keap refresh tokens are single-use - each refresh returns a new one
+   */
+  private async saveRefreshToken(newToken: string): Promise<void> {
+    try {
+      const secretName = `projects/${this.projectId}/secrets/KEAP_REFRESH_TOKEN`;
+
+      // Add a new version with the new refresh token
+      await this.secretManagerClient.addSecretVersion({
+        parent: secretName,
+        payload: {
+          data: Buffer.from(newToken, 'utf8'),
+        },
+      });
+
+      // Update our in-memory copy
+      this.currentRefreshToken = newToken;
+
+      logger.info('Saved new Keap refresh token to Secret Manager');
+    } catch (error) {
+      // Log but don't throw - the current request can still succeed
+      // Next request will fail though if we don't have the new token
+      logger.error({ error }, 'Failed to save new refresh token to Secret Manager');
+    }
+  }
+
   async getAccessToken(): Promise<string> {
     const now = Date.now();
 
@@ -54,7 +88,8 @@ class KeapClient {
 
     const clientId = process.env.KEAP_CLIENT_ID;
     const clientSecret = process.env.KEAP_CLIENT_SECRET;
-    const refreshToken = process.env.KEAP_REFRESH_TOKEN;
+    // Use in-memory token if we have one (from previous refresh), else use env var
+    const refreshToken = this.currentRefreshToken || process.env.KEAP_REFRESH_TOKEN;
 
     if (!clientId || !clientSecret || !refreshToken) {
       throw new Error('Missing Keap OAuth credentials');
@@ -77,6 +112,11 @@ class KeapClient {
 
       this.accessToken = response.data.access_token;
       this.tokenExpiry = now + response.data.expires_in * 1000;
+
+      // IMPORTANT: Save the new refresh token - Keap tokens are single-use!
+      if (response.data.refresh_token && response.data.refresh_token !== refreshToken) {
+        await this.saveRefreshToken(response.data.refresh_token);
+      }
 
       logger.info('Keap access token refreshed');
       return this.accessToken;
