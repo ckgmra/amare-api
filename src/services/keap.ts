@@ -228,6 +228,165 @@ class KeapClient {
   }
 
   /**
+   * Create or update a contact with pass-through custom fields
+   *
+   * Custom fields are passed as field_name → value pairs.
+   * We need to look up field IDs from Keap first.
+   */
+  async createOrUpdateContactWithFields(
+    email: string,
+    firstName: string,
+    customFields: Record<string, string>
+  ): Promise<KeapContact> {
+    try {
+      const existingContact = await this.findContactByEmail(email);
+
+      // Convert field names to field IDs
+      const customFieldsArray = await this.convertFieldNamesToIds(customFields);
+
+      const contactData: Record<string, unknown> = {
+        email_addresses: [{ email: email, field: 'EMAIL1' }],
+        given_name: firstName,
+        duplicate_option: 'Email',
+      };
+
+      if (customFieldsArray.length > 0) {
+        contactData.custom_fields = customFieldsArray;
+      }
+
+      if (existingContact) {
+        const response = await this.axiosInstance.patch(
+          `/contacts/${existingContact.id}`,
+          contactData
+        );
+        logger.info({ contactId: existingContact.id, email }, 'Contact updated with custom fields');
+        return response.data;
+      } else {
+        const response = await this.axiosInstance.post('/contacts', contactData);
+        logger.info({ contactId: response.data.id, email }, 'Contact created with custom fields');
+        return response.data;
+      }
+    } catch (error) {
+      logger.error({ error, email }, 'Failed to create/update contact with custom fields');
+      throw error;
+    }
+  }
+
+  /**
+   * Convert field names to Keap field IDs
+   * Caches the field mapping to avoid repeated API calls
+   */
+  private fieldNameToIdCache: Map<string, number> | null = null;
+
+  private async getFieldNameToIdMap(): Promise<Map<string, number>> {
+    if (this.fieldNameToIdCache) {
+      return this.fieldNameToIdCache;
+    }
+
+    try {
+      const response = await this.axiosInstance.get('/contactCustomFields');
+      const fields = response.data.custom_fields || [];
+
+      this.fieldNameToIdCache = new Map();
+      for (const field of fields) {
+        // Store by label (display name)
+        if (field.label) {
+          this.fieldNameToIdCache.set(field.label, field.id);
+        }
+        // Also store by database name if different
+        if (field.field_name && field.field_name !== field.label) {
+          this.fieldNameToIdCache.set(field.field_name, field.id);
+        }
+      }
+
+      logger.info({ fieldCount: this.fieldNameToIdCache.size }, 'Cached Keap custom field mappings');
+      return this.fieldNameToIdCache;
+    } catch (error) {
+      logger.error({ error }, 'Failed to fetch Keap custom fields');
+      throw error;
+    }
+  }
+
+  private async convertFieldNamesToIds(
+    fields: Record<string, string>
+  ): Promise<Array<{ id: number; content: string }>> {
+    const fieldMap = await this.getFieldNameToIdMap();
+    const result: Array<{ id: number; content: string }> = [];
+
+    for (const [name, value] of Object.entries(fields)) {
+      const fieldId = fieldMap.get(name);
+      if (fieldId) {
+        result.push({ id: fieldId, content: value });
+      } else {
+        logger.warn({ fieldName: name }, 'Unknown Keap custom field name, skipping');
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Apply a tag by name (looks up tag ID first)
+   * Caches the tag mapping to avoid repeated API calls
+   */
+  private tagNameToIdCache: Map<string, number> | null = null;
+
+  private async getTagNameToIdMap(): Promise<Map<string, number>> {
+    if (this.tagNameToIdCache) {
+      return this.tagNameToIdCache;
+    }
+
+    try {
+      // Fetch all tags (paginated)
+      this.tagNameToIdCache = new Map();
+      let offset = 0;
+      const limit = 1000;
+      let hasMore = true;
+
+      while (hasMore) {
+        const response = await this.axiosInstance.get('/tags', {
+          params: { offset, limit },
+        });
+
+        const tags = response.data.tags || [];
+        for (const tag of tags) {
+          if (tag.name) {
+            this.tagNameToIdCache.set(tag.name, tag.id);
+          }
+        }
+
+        hasMore = tags.length === limit;
+        offset += limit;
+      }
+
+      logger.info({ tagCount: this.tagNameToIdCache.size }, 'Cached Keap tag mappings');
+      return this.tagNameToIdCache;
+    } catch (error) {
+      logger.error({ error }, 'Failed to fetch Keap tags');
+      throw error;
+    }
+  }
+
+  async applyTagByName(contactId: number, tagName: string): Promise<void> {
+    try {
+      const tagMap = await this.getTagNameToIdMap();
+      const tagId = tagMap.get(tagName);
+
+      if (!tagId) {
+        throw new Error(`Unknown tag: ${tagName}`);
+      }
+
+      await this.axiosInstance.post(`/contacts/${contactId}/tags`, {
+        tagIds: [tagId],
+      });
+      logger.info({ contactId, tagName, tagId }, 'Tag applied by name');
+    } catch (error) {
+      logger.error({ error, contactId, tagName }, 'Failed to apply tag by name');
+      throw error;
+    }
+  }
+
+  /**
    * Remove tags from a contact
    *
    * Keap API only allows removing one tag at a time, so we loop through

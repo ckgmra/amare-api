@@ -2,33 +2,36 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { v4 as uuidv4 } from 'uuid';
 import { keapClient } from '../services/keap.js';
 import { bigQueryClient } from '../services/bigquery.js';
-import { getBrandConfig } from '../config/brands.js';
-import { buildCustomFields, SUPPORTED_BRANDS } from '../config/keapFields.js';
-import type { SubscribeResponse, SubscriberQueueEntry } from '../types/index.js';
+import { SUPPORTED_BRANDS } from '../config/keapFields.js';
+import type { SubscriberQueueEntry } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+
+// API key for authenticating requests from brand sites
+const API_KEY = process.env.SUBSCRIBE_API_KEY;
 
 /**
  * Subscribe endpoint request body
  *
  * Required fields:
- * - fname: First name
- * - em: Email address
+ * - email: Email address
+ * - firstName: First name
  * - brand: Brand code (chkh, hryw, gkh, flo)
+ * - tag: Keap tag name to apply (e.g., "HRYW-WebSub")
  *
  * Optional fields:
- * - sourceId: Tracking source identifier (e.g., "homepage-popup", "blog-sidebar")
- * - redirectSlug: Custom redirect path after signup
- * - optionalInputs: Additional data to store (JSON string or comma-separated values)
- * - website: Honeypot field - must be empty (bots fill this in)
+ * - customFields: Object with Keap field names as keys (passed through to Keap)
  */
 interface SubscribeBody {
-  fname?: string;
-  em?: string;
-  brand?: string;
-  sourceId?: string;
-  redirectSlug?: string;
-  optionalInputs?: string;
-  website?: string; // honeypot
+  email: string;
+  firstName: string;
+  brand: string;
+  tag: string;
+  customFields?: Record<string, string>;
+}
+
+interface SubscribeResponse {
+  success: boolean;
+  error?: string;
 }
 
 export async function subscribeRoutes(fastify: FastifyInstance) {
@@ -38,30 +41,16 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
       schema: {
         body: {
           type: 'object',
-          required: ['fname', 'em', 'brand'],
+          required: ['email', 'firstName', 'brand', 'tag'],
           properties: {
-            fname: { type: 'string', description: 'First name' },
-            em: { type: 'string', format: 'email', description: 'Email address' },
-            brand: {
-              type: 'string',
-              enum: [...SUPPORTED_BRANDS],
-              description: 'Brand code (chkh, hryw, gkh, flo)',
-            },
-            sourceId: {
-              type: 'string',
-              description: 'Tracking source identifier (e.g., homepage-popup)',
-            },
-            redirectSlug: {
-              type: 'string',
-              description: 'Custom redirect path after signup',
-            },
-            optionalInputs: {
-              type: 'string',
-              description: 'Additional data to store',
-            },
-            website: {
-              type: 'string',
-              description: 'Honeypot field - must be empty',
+            email: { type: 'string', format: 'email' },
+            firstName: { type: 'string' },
+            brand: { type: 'string', enum: [...SUPPORTED_BRANDS] },
+            tag: { type: 'string', description: 'Keap tag name to apply' },
+            customFields: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+              description: 'Keap custom fields (field name → value)',
             },
           },
         },
@@ -70,10 +59,16 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
             type: 'object',
             properties: {
               success: { type: 'boolean' },
-              redirectUrl: { type: 'string' },
             },
           },
           400: {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+              error: { type: 'string' },
+            },
+          },
+          401: {
             type: 'object',
             properties: {
               success: { type: 'boolean' },
@@ -87,33 +82,40 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
       const requestId = request.id;
       const reqLogger = logger.child({ requestId });
 
-      try {
-        const { fname, em, brand, sourceId, redirectSlug, optionalInputs, website } = request.body;
+      // Validate API key
+      const apiKey = request.headers['x-api-key'];
+      if (!API_KEY) {
+        reqLogger.error('SUBSCRIBE_API_KEY not configured');
+        return reply.status(500).send({
+          success: false,
+          error: 'Server configuration error',
+        } satisfies SubscribeResponse);
+      }
 
-        // Honeypot check - reject if website field has any value
-        if (website) {
-          reqLogger.warn({ website }, 'Honeypot triggered');
-          return reply.status(400).send({
-            success: false,
-            error: 'Invalid submission',
-          } satisfies SubscribeResponse);
-        }
+      if (apiKey !== API_KEY) {
+        reqLogger.warn({ providedKey: apiKey ? 'present' : 'missing' }, 'Invalid API key');
+        return reply.status(401).send({
+          success: false,
+          error: 'Unauthorized',
+        } satisfies SubscribeResponse);
+      }
+
+      try {
+        const { email, firstName, brand, tag, customFields } = request.body;
 
         // Validate required fields
-        if (!fname || !em || !brand) {
+        if (!email || !firstName || !brand || !tag) {
           return reply.status(400).send({
             success: false,
-            error: 'Missing required fields: fname, em, brand',
+            error: 'Missing required fields: email, firstName, brand, tag',
           } satisfies SubscribeResponse);
         }
 
-        // Get brand configuration
-        const brandConfig = getBrandConfig(brand);
-        if (!brandConfig) {
-          reqLogger.warn({ brand }, 'Unknown brand');
+        // Validate brand
+        if (!SUPPORTED_BRANDS.includes(brand.toLowerCase() as any)) {
           return reply.status(400).send({
             success: false,
-            error: `Unknown brand: ${brand}. Supported brands: ${SUPPORTED_BRANDS.join(', ')}`,
+            error: `Unknown brand: ${brand}. Supported: ${SUPPORTED_BRANDS.join(', ')}`,
           } satisfies SubscribeResponse);
         }
 
@@ -129,14 +131,14 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
         // Create queue entry
         const queueEntry: SubscriberQueueEntry = {
           id: uuidv4(),
-          email: em,
-          first_name: fname,
+          email,
+          first_name: firstName,
           brand: brand.toUpperCase(),
-          dp_source_id: sourceId || null,
-          dp_ip_address: ipAddress,
-          dp_first_upload_time: now,
-          dp_optional_inputs: optionalInputs || null,
-          redirect_slug: redirectSlug || null,
+          dp_source_id: customFields?.['DP_SOURCE_ID_' + brand.toUpperCase()] || null,
+          dp_ip_address: customFields?.['DP_IP_ADDRESS'] || ipAddress,
+          dp_first_upload_time: customFields?.['DP_FIRST_UPLOAD_TIME_' + brand.toUpperCase()] || now,
+          dp_optional_inputs: customFields?.['DP_OPTIONAL_INPUTS_' + brand.toUpperCase()] || null,
+          redirect_slug: null, // Not used - redirect handled by client
           source_url: sourceUrl,
           user_agent: userAgent,
           is_processed: false,
@@ -151,65 +153,50 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
         await bigQueryClient.queueSubscriber(queueEntry);
 
         reqLogger.info(
-          {
-            queueId: queueEntry.id,
-            email: em,
-            brand: brandConfig.brandCode,
-            sourceId,
-            ipAddress,
-          },
+          { queueId: queueEntry.id, email, brand, tag },
           'Subscriber queued'
         );
 
         // Now attempt to process immediately
         let contactId: number | null = null;
-        let tagsApplied: number[] = [];
         let processingError: string | null = null;
 
         try {
-          // Build custom fields for Keap (with brand suffix logic)
-          const customFields = buildCustomFields(brand, {
-            sourceId,
-            ipAddress,
-            optionalInputs,
-            firstUploadTime: now,
-          });
-
-          // Create or update contact in Keap
-          const contact = await keapClient.createOrUpdateContact(em, fname, customFields);
+          // Create or update contact in Keap with custom fields passed through
+          const contact = await keapClient.createOrUpdateContactWithFields(
+            email,
+            firstName,
+            customFields || {}
+          );
           contactId = contact.id;
 
-          // Apply signup tags
-          if (brandConfig.signupTagIds.length > 0) {
-            await keapClient.applyTags(contact.id, brandConfig.signupTagIds);
-            tagsApplied = brandConfig.signupTagIds;
-          }
+          // Apply the tag by name
+          await keapClient.applyTagByName(contact.id, tag);
 
           reqLogger.info(
-            { contactId, tagsApplied },
+            { contactId, tag },
             'Keap processing completed'
           );
         } catch (keapError) {
           // Keap failed - subscriber is queued, will retry later
           processingError = keapError instanceof Error ? keapError.message : 'Keap processing failed';
-          reqLogger.warn({ error: keapError, queueId: queueEntry.id }, 'Keap processing failed, subscriber queued for retry');
+          reqLogger.warn(
+            { error: keapError, queueId: queueEntry.id },
+            'Keap processing failed, subscriber queued for retry'
+          );
         }
 
         // Update queue entry with processing result
         await bigQueryClient.updateSubscriberStatus(
           queueEntry.id,
           contactId,
-          tagsApplied,
+          [], // Tag IDs not used since we apply by name
           processingError
         );
 
-        // Build redirect URL
-        const redirectUrl = redirectSlug || brandConfig.defaultRedirect;
-
-        // Always return success to the user (their submission is saved)
+        // Return success (no redirect URL - client handles that)
         return reply.send({
           success: true,
-          redirectUrl,
         } satisfies SubscribeResponse);
       } catch (error) {
         reqLogger.error({ error }, 'Subscribe request failed');
