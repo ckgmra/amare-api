@@ -28,6 +28,7 @@ interface SubscribeBody {
   tag: string;
   customFields?: Record<string, string>;
   sourceUrl?: string;
+  redirectSlug?: string;
 }
 
 interface SubscribeResponse {
@@ -54,6 +55,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
               description: 'Keap custom fields (field name → value)',
             },
             sourceUrl: { type: 'string', description: 'Original page URL where form was submitted' },
+            redirectSlug: { type: 'string', description: 'Redirect path after signup (for forensic tracking)' },
           },
         },
         response: {
@@ -103,7 +105,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        const { email, firstName, brand, tag, customFields, sourceUrl } = request.body;
+        const { email, firstName, brand, tag, customFields, sourceUrl, redirectSlug } = request.body;
 
         // Store raw payload for debugging
         const rawPayload = JSON.stringify(request.body);
@@ -144,7 +146,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
           dp_ip_address: customFields?.['DP_IP_ADDRESS'] || ipAddress,
           dp_first_upload_time: customFields?.['DP_FIRST_UPLOAD_TIME_' + brand.toUpperCase()] || now,
           dp_optional_inputs: customFields?.['DP_OPTIONAL_INPUTS_' + brand.toUpperCase()] || null,
-          redirect_slug: null, // Not used - redirect handled by client
+          redirect_slug: redirectSlug || null, // For forensic tracking of subscriber journey
           source_url: resolvedSourceUrl,
           user_agent: userAgent,
           raw_payload: rawPayload,

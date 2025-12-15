@@ -127,11 +127,17 @@ class BigQueryClient {
     error: string | null
   ): Promise<void> {
     try {
+      // Build tags array as SQL literal since BigQuery parameterized queries
+      // have issues with REPEATED fields in UPDATE statements
+      const tagsArrayLiteral = tagsApplied.length > 0
+        ? `[${tagsApplied.map(t => `'${t.replace(/'/g, "\\'")}'`).join(', ')}]`
+        : '[]';
+
       const query = `
         UPDATE \`${this.projectId}.${this.dataset}.${this.subscriberQueueTable}\`
         SET is_processed = true,
             keap_contact_id = @keapContactId,
-            tags_applied = @tagsApplied,
+            tags_applied = ${tagsArrayLiteral},
             processing_error = @error,
             processed_at = CURRENT_TIMESTAMP()
         WHERE id = @id
@@ -139,12 +145,15 @@ class BigQueryClient {
 
       await this.client.query({
         query,
-        params: { id, keapContactId, tagsApplied, error },
+        params: { id, keapContactId, error },
       });
 
-      logger.info({ id, keapContactId, success: !error }, 'Subscriber status updated');
+      logger.info({ id, keapContactId, tagsApplied, success: !error }, 'Subscriber status updated');
     } catch (err) {
-      logger.error({ error: err, id }, 'Failed to update subscriber status');
+      // Log the full error for debugging
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const errorStack = err instanceof Error ? err.stack : undefined;
+      logger.error({ error: errorMessage, stack: errorStack, id }, 'Failed to update subscriber status');
     }
   }
 
