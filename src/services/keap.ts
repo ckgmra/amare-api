@@ -157,7 +157,6 @@ class KeapClient {
       const contactData: Record<string, unknown> = {
         email_addresses: [{ email: email, field: 'EMAIL1' }],
         given_name: firstName,
-        duplicate_option: 'Email',
       };
 
       if (customFields && customFields.length > 0) {
@@ -172,7 +171,10 @@ class KeapClient {
         logger.info({ contactId: existingContact.id, email }, 'Contact updated');
         return response.data;
       } else {
-        const response = await this.axiosInstance.post('/contacts', contactData);
+        // duplicate_option must be a query parameter, not in the body
+        const response = await this.axiosInstance.post('/contacts', contactData, {
+          params: { duplicate_option: 'Email' }
+        });
         logger.info({ contactId: response.data.id, email }, 'Contact created');
         return response.data;
       }
@@ -222,7 +224,6 @@ class KeapClient {
         email_addresses: [{ email: email, field: 'EMAIL1' }],
         given_name: firstName,
         family_name: lastName,
-        duplicate_option: 'Email',
       };
 
       if (customFields.length > 0) {
@@ -240,7 +241,10 @@ class KeapClient {
         );
         return response.data;
       } else {
-        const response = await this.axiosInstance.post('/contacts', contactData);
+        // duplicate_option must be a query parameter, not in the body
+        const response = await this.axiosInstance.post('/contacts', contactData, {
+          params: { duplicate_option: 'Email' }
+        });
         logger.info({ contactId: response.data.id, email, receipt }, 'Clickbank contact created');
         return response.data;
       }
@@ -293,7 +297,6 @@ class KeapClient {
       const contactData: Record<string, unknown> = {
         email_addresses: [{ email: email, field: 'EMAIL1' }],
         given_name: firstName,
-        duplicate_option: 'Email',
       };
 
       if (customFieldsArray.length > 0) {
@@ -310,7 +313,10 @@ class KeapClient {
         logger.info({ contactId: existingContact.id, email }, 'Contact updated with custom fields');
         return response.data;
       } else {
-        const response = await this.axiosInstance.post('/contacts', contactData);
+        // duplicate_option must be a query parameter, not in the body
+        const response = await this.axiosInstance.post('/contacts', contactData, {
+          params: { duplicate_option: 'Email' }
+        });
         logger.info({ contactId: response.data.id, email }, 'Contact created with custom fields');
         return response.data;
       }
