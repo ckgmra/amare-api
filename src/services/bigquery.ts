@@ -9,6 +9,7 @@ class BigQueryClient {
   private productTagsTable: string;
   private transactionsTable: string;
   private subscriberQueueTable: string;
+  private subscriberResultsTable: string;
 
   constructor() {
     this.projectId = process.env.GCP_PROJECT_ID || 'watchful-force-477418-b9';
@@ -18,6 +19,7 @@ class BigQueryClient {
       process.env.BIGQUERY_TABLE_TRANSACTIONS || 'clickbank_transactions';
     this.subscriberQueueTable =
       process.env.BIGQUERY_TABLE_SUBSCRIBER_QUEUE || 'subscriber_queue';
+    this.subscriberResultsTable = 'subscriber_processing_results';
 
     this.client = new BigQuery({
       projectId: this.projectId,
@@ -118,7 +120,11 @@ class BigQueryClient {
   }
 
   /**
-   * Mark a subscriber as processed (success or failure)
+   * Record subscriber processing result (append-only pattern)
+   *
+   * Instead of UPDATE (which fails on streaming buffer), we INSERT to a
+   * separate results table. Use the subscriber_with_status view to see
+   * the combined data.
    */
   async updateSubscriberStatus(
     id: string,
@@ -127,38 +133,27 @@ class BigQueryClient {
     error: string | null
   ): Promise<void> {
     try {
-      // Build tags array as SQL literal since BigQuery parameterized queries
-      // have issues with REPEATED fields in UPDATE statements
-      const tagsArrayLiteral = tagsApplied.length > 0
-        ? `[${tagsApplied.map(t => `'${t.replace(/'/g, "\\'")}'`).join(', ')}]`
-        : '[]';
+      const tableRef = this.client.dataset(this.dataset).table(this.subscriberResultsTable);
 
-      const query = `
-        UPDATE \`${this.projectId}.${this.dataset}.${this.subscriberQueueTable}\`
-        SET is_processed = true,
-            keap_contact_id = @keapContactId,
-            tags_applied = ${tagsArrayLiteral},
-            processing_error = @error,
-            processed_at = CURRENT_TIMESTAMP()
-        WHERE id = @id
-      `;
+      const resultRecord = {
+        subscriber_id: id,
+        keap_contact_id: keapContactId,
+        tags_applied: tagsApplied,
+        processing_error: error,
+        is_success: !error,
+        processed_at: new Date().toISOString(),
+      };
 
-      await this.client.query({
-        query,
-        params: { id, keapContactId, error },
-        types: {
-          id: 'STRING',
-          keapContactId: 'INT64',
-          error: 'STRING',
-        },
-      });
-
-      logger.info({ id, keapContactId, tagsApplied, success: !error }, 'Subscriber status updated');
+      await tableRef.insert([resultRecord]);
+      logger.info({ id, keapContactId, tagsApplied, success: !error }, 'Subscriber processing result recorded');
     } catch (err) {
-      // Log the full error for debugging
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      const errorStack = err instanceof Error ? err.stack : undefined;
-      logger.error({ error: errorMessage, stack: errorStack, id }, 'Failed to update subscriber status');
+      const bqError = err as { errors?: Array<{ errors: unknown[] }> };
+      if (bqError.errors) {
+        logger.error({ errors: bqError.errors, id }, 'BigQuery result insert errors');
+      } else {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.error({ error: errorMessage, id }, 'Failed to record subscriber processing result');
+      }
     }
   }
 
@@ -303,7 +298,7 @@ class BigQueryClient {
         { name: 'processed_at', type: 'TIMESTAMP', mode: 'NULLABLE' },
       ];
 
-      // Subscriber queue table schema
+      // Subscriber queue table schema (initial submission data only)
       const subscriberQueueSchema = [
         { name: 'id', type: 'STRING', mode: 'REQUIRED' },
         { name: 'email', type: 'STRING', mode: 'REQUIRED' },
@@ -324,6 +319,17 @@ class BigQueryClient {
         { name: 'processing_error', type: 'STRING', mode: 'NULLABLE' },
         { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
         { name: 'processed_at', type: 'TIMESTAMP', mode: 'NULLABLE' },
+      ];
+
+      // Subscriber processing results table schema (append-only)
+      // This avoids the streaming buffer UPDATE limitation
+      const subscriberResultsSchema = [
+        { name: 'subscriber_id', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'keap_contact_id', type: 'INTEGER', mode: 'NULLABLE' },
+        { name: 'tags_applied', type: 'STRING', mode: 'REPEATED' },
+        { name: 'processing_error', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'is_success', type: 'BOOLEAN', mode: 'REQUIRED' },
+        { name: 'processed_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
       ];
 
       // Create product tags table if not exists
@@ -366,6 +372,23 @@ class BigQueryClient {
           },
         });
         logger.info({ table: this.subscriberQueueTable }, 'Created subscriber queue table');
+      }
+
+      // Create subscriber processing results table if not exists
+      const subscriberResultsTableRef = dataset.table(this.subscriberResultsTable);
+      const [subscriberResultsExists] = await subscriberResultsTableRef.exists();
+      if (!subscriberResultsExists) {
+        await subscriberResultsTableRef.create({
+          schema: subscriberResultsSchema,
+          timePartitioning: {
+            type: 'DAY',
+            field: 'processed_at',
+          },
+          clustering: {
+            fields: ['subscriber_id', 'is_success'],
+          },
+        });
+        logger.info({ table: this.subscriberResultsTable }, 'Created subscriber processing results table');
       }
     } catch (error) {
       logger.error({ error }, 'Failed to ensure BigQuery tables exist');

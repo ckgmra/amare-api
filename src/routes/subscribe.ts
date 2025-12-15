@@ -202,29 +202,21 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
           );
         }
 
-        // Send response immediately - don't make client wait for BigQuery update
-        reply.send({
+        // Record processing result to BigQuery (append-only, no streaming buffer issues)
+        // Fire and forget - don't make client wait
+        bigQueryClient.updateSubscriberStatus(
+          queueEntry.id,
+          contactId,
+          tagsApplied,
+          processingError
+        ).catch(bqError => {
+          reqLogger.error({ queueId: queueEntry.id, error: bqError }, 'Failed to record processing result');
+        });
+
+        // Return success immediately
+        return reply.send({
           success: true,
         } satisfies SubscribeResponse);
-
-        // Schedule BigQuery status update after 30 seconds (fire and forget)
-        // This delay allows the row to leave the streaming buffer before UPDATE
-        const updateData = { queueId: queueEntry.id, contactId, tagsApplied, processingError };
-        setTimeout(async () => {
-          try {
-            await bigQueryClient.updateSubscriberStatus(
-              queueEntry.id,
-              contactId,
-              tagsApplied,
-              processingError
-            );
-            reqLogger.info(updateData, 'BigQuery status updated (delayed)');
-          } catch (bqError) {
-            reqLogger.error({ ...updateData, error: bqError }, 'Delayed BigQuery update failed');
-          }
-        }, 30000); // 30 second delay
-
-        return reply;
       } catch (error) {
         reqLogger.error({ error }, 'Subscribe request failed');
         return reply.status(500).send({
