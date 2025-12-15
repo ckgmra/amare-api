@@ -185,6 +185,10 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
           await keapClient.applyTagByName(contact.id, tag);
           tagsApplied = [tag];
 
+          // Opt-in the contact for email marketing
+          // This is REQUIRED for them to receive welcome emails and marketing
+          await keapClient.optInEmail(email, 'Website signup form');
+
           reqLogger.info(
             { contactId, tag },
             'Keap processing completed'

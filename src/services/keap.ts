@@ -457,6 +457,41 @@ class KeapClient {
   }
 
   /**
+   * Opt-in a contact for email marketing
+   *
+   * This is REQUIRED for contacts to receive marketing emails.
+   * Without calling this, Keap will show "no evidence that this person
+   * has consented to receive marketing" and won't send emails.
+   *
+   * @param email - The email address to opt-in
+   * @param reason - The reason for opt-in (e.g., "Website signup form")
+   */
+  async optInEmail(email: string, reason: string = 'Website signup form'): Promise<void> {
+    try {
+      await this.axiosInstance.post('/emails/unsub', {
+        email_address: email,
+        opt_in: true,
+        opt_in_reason: reason,
+      });
+      logger.info({ email, reason }, 'Contact opted in for email marketing');
+    } catch (error) {
+      // Try alternative method - update contact directly with opt_in_reason
+      try {
+        const contact = await this.findContactByEmail(email);
+        if (contact) {
+          await this.axiosInstance.patch(`/contacts/${contact.id}`, {
+            opt_in_reason: reason,
+          });
+          logger.info({ email, contactId: contact.id, reason }, 'Contact opted in via contact update');
+        }
+      } catch (fallbackError) {
+        logger.error({ error: fallbackError, email }, 'Failed to opt-in contact (fallback)');
+        throw fallbackError;
+      }
+    }
+  }
+
+  /**
    * Remove tags from a contact
    *
    * Keap API only allows removing one tag at a time, so we loop through
