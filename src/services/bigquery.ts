@@ -146,6 +146,11 @@ class BigQueryClient {
       await this.client.query({
         query,
         params: { id, keapContactId, error },
+        types: {
+          id: 'STRING',
+          keapContactId: 'INT64',
+          error: 'STRING',
+        },
       });
 
       logger.info({ id, keapContactId, tagsApplied, success: !error }, 'Subscriber status updated');
