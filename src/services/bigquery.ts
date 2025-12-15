@@ -159,14 +159,19 @@ class BigQueryClient {
 
   /**
    * Get unprocessed subscribers for retry processing
+   *
+   * Uses LEFT JOIN with results table to find subscribers that don't
+   * have a processing result yet (append-only pattern).
    */
   async getUnprocessedSubscribers(limit: number = 100): Promise<SubscriberQueueEntry[]> {
     try {
       const query = `
-        SELECT *
-        FROM \`${this.projectId}.${this.dataset}.${this.subscriberQueueTable}\`
-        WHERE is_processed = false
-        ORDER BY created_at ASC
+        SELECT q.*
+        FROM \`${this.projectId}.${this.dataset}.${this.subscriberQueueTable}\` q
+        LEFT JOIN \`${this.projectId}.${this.dataset}.${this.subscriberResultsTable}\` r
+          ON q.id = r.subscriber_id
+        WHERE r.subscriber_id IS NULL
+        ORDER BY q.created_at ASC
         LIMIT @limit
       `;
 
