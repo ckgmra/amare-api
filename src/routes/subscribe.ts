@@ -181,16 +181,19 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
           );
           contactId = contact.id;
 
-          // Apply the tag by name
-          await keapClient.applyTagByName(contact.id, tag);
-          tagsApplied = [tag];
+          // Apply tags - support pipe-delimited multiple tags (e.g., "HRYW-WebSub|HRYW-Clickbank-Lead")
+          const tagNames = tag.split('|').map(t => t.trim()).filter(t => t.length > 0);
+          for (const tagName of tagNames) {
+            await keapClient.applyTagByName(contact.id, tagName);
+            tagsApplied.push(tagName);
+          }
 
           // Opt-in the contact for email marketing
           // This is REQUIRED for them to receive welcome emails and marketing
           await keapClient.optInEmail(email, 'Website signup form');
 
           reqLogger.info(
-            { contactId, tag },
+            { contactId, tags: tagsApplied },
             'Keap processing completed'
           );
         } catch (keapError) {
