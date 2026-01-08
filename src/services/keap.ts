@@ -525,6 +525,27 @@ class KeapClient {
       logger.warn({ contactId, failedTags }, 'Some tags could not be removed');
     }
   }
+
+  /**
+   * Add a note to a contact
+   *
+   * Used for ClickBank refund/chargeback tracking
+   * @param contactId - The Keap contact ID
+   * @param noteText - The note text (e.g., 'Cancelled_HRYW_MS')
+   */
+  async addNote(contactId: number, noteText: string): Promise<void> {
+    try {
+      await this.axiosInstance.post(`/contacts/${contactId}/notes`, {
+        title: 'ClickBank Transaction',
+        body: noteText,
+        type: 'Other',
+      });
+      logger.info({ contactId, noteText }, 'Note added to contact');
+    } catch (error) {
+      logger.error({ error, contactId, noteText }, 'Failed to add note to contact');
+      throw error;
+    }
+  }
 }
 
 export const keapClient = new KeapClient();

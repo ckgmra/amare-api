@@ -322,9 +322,6 @@ async function processQueuedTransaction(
     // Get tag actions for this product + transaction type
     const tagActions = await bigQueryClient.getTagActionsForProduct(product_id, transaction_type);
 
-    tagsApplied = tagActions.filter((t) => t.action === 'APPLY').map((t) => t.tagId);
-    tagsRemoved = tagActions.filter((t) => t.action === 'REMOVE').map((t) => t.tagId);
-
     if (tagActions.length === 0) {
       reqLogger.warn({ product_id, transaction_type }, 'No tag actions configured');
     }
@@ -340,20 +337,31 @@ async function processQueuedTransaction(
 
     contactId = contact.id;
 
-    // Apply tags
-    if (tagsApplied.length > 0) {
-      await keapClient.applyTags(contact.id, tagsApplied);
-      reqLogger.info({ contactId: contact.id, tags: tagsApplied }, 'Tags applied');
-    }
-
-    // Remove tags
-    if (tagsRemoved.length > 0) {
-      await keapClient.removeTags(contact.id, tagsRemoved);
-      reqLogger.info({ contactId: contact.id, tags: tagsRemoved }, 'Tags removed');
+    // Process each action
+    for (const action of tagActions) {
+      if (action.action === 'apply_tag' && action.tagId > 0) {
+        // Apply tag
+        await keapClient.applyTags(contact.id, [action.tagId]);
+        tagsApplied.push(action.tagId);
+        reqLogger.info(
+          { contactId: contact.id, tagId: action.tagId, tagName: action.triggerTag },
+          'Tag applied'
+        );
+      } else if (action.action === 'apply_note' && action.triggerTag) {
+        // Add note - extract text after "ADDNOTE:" prefix
+        const noteText = action.triggerTag.startsWith('ADDNOTE:')
+          ? action.triggerTag.substring(8)
+          : action.triggerTag;
+        await keapClient.addNote(contact.id, noteText);
+        reqLogger.info(
+          { contactId: contact.id, noteText },
+          'Note added to contact'
+        );
+      }
     }
 
     reqLogger.info(
-      { transactionId: id, receipt, contactId, tagsApplied, tagsRemoved },
+      { transactionId: id, receipt, contactId, tagsApplied, actionsProcessed: tagActions.length },
       'Transaction processed successfully'
     );
   } catch (error) {

@@ -65,9 +65,10 @@ export interface ClickbankIpnDecrypted {
 
 // Tag action from BigQuery product_tags table
 export interface TagAction {
-  action: 'APPLY' | 'REMOVE';
-  tagId: number;
-  tagName?: string;
+  action: 'apply_tag' | 'apply_note';
+  tagId: number; // Keap tag ID (0 for notes)
+  tagCategory?: string; // e.g., 'CustomerHub', 'Products Purchased', 'n/a'
+  triggerTag?: string; // Human-readable tag name or ADDNOTE: text
 }
 
 // Subscriber queue entry for BigQuery

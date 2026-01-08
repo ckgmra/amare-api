@@ -29,19 +29,27 @@ class BigQueryClient {
   /**
    * Get tag actions for a product and transaction type
    *
-   * Returns array of {action, tagId} objects where action is 'APPLY' or 'REMOVE'
-   * This allows different behavior for SALE vs RFND vs CGBK transactions
+   * Returns array of action objects where action is 'apply_tag' or 'apply_note'
+   * Supports pipe-delimited transaction types (e.g., 'SALE|TEST_SALE')
+   * Matches if transactionType is in the pipe-delimited list
    */
   async getTagActionsForProduct(
     productId: string,
     transactionType: string
   ): Promise<TagAction[]> {
     try {
+      // Query using LIKE with pipe delimiters to match
+      // e.g., transaction_type 'SALE' matches row with 'SALE|TEST_SALE|REBILL'
       const query = `
-        SELECT action, tag_id, tag_name
+        SELECT action, keap_tag_id, keap_tag_category, fulfillment_trigger_tag
         FROM \`${this.projectId}.${this.dataset}.${this.productTagsTable}\`
-        WHERE product_id = @productId
-          AND transaction_type = @transactionType
+        WHERE clickbank_product_id = @productId
+          AND (
+            transaction_type = @transactionType
+            OR transaction_type LIKE CONCAT(@transactionType, '|%')
+            OR transaction_type LIKE CONCAT('%|', @transactionType, '|%')
+            OR transaction_type LIKE CONCAT('%|', @transactionType)
+          )
           AND active = true
       `;
 
@@ -51,10 +59,16 @@ class BigQueryClient {
       });
 
       const tagActions: TagAction[] = rows.map(
-        (row: { action: string; tag_id: number; tag_name?: string }) => ({
-          action: row.action as 'APPLY' | 'REMOVE',
-          tagId: row.tag_id,
-          tagName: row.tag_name,
+        (row: {
+          action: string;
+          keap_tag_id: number;
+          keap_tag_category?: string;
+          fulfillment_trigger_tag?: string;
+        }) => ({
+          action: row.action as 'apply_tag' | 'apply_note',
+          tagId: row.keap_tag_id,
+          tagCategory: row.keap_tag_category,
+          triggerTag: row.fulfillment_trigger_tag,
         })
       );
 
@@ -259,14 +273,15 @@ class BigQueryClient {
         logger.info({ dataset: this.dataset }, 'Created BigQuery dataset');
       }
 
-      // Product tags table schema (updated with transaction_type and action)
+      // Product tags table schema (redesigned for fulfillment tracking)
       const productTagsSchema = [
-        { name: 'product_id', type: 'STRING', mode: 'REQUIRED' },
+        { name: 'clickbank_product_id', type: 'STRING', mode: 'REQUIRED' },
         { name: 'brand', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'transaction_type', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'action', type: 'STRING', mode: 'REQUIRED' },
-        { name: 'tag_id', type: 'INTEGER', mode: 'REQUIRED' },
-        { name: 'tag_name', type: 'STRING', mode: 'NULLABLE' },
+        { name: 'transaction_type', type: 'STRING', mode: 'REQUIRED' }, // Pipe-delimited: 'SALE|TEST_SALE'
+        { name: 'action', type: 'STRING', mode: 'REQUIRED' }, // 'apply_tag' or 'apply_note'
+        { name: 'fulfillment_trigger_tag', type: 'STRING', mode: 'NULLABLE' }, // Human-readable tag name or ADDNOTE: text
+        { name: 'keap_tag_id', type: 'INTEGER', mode: 'REQUIRED' }, // Keap numeric tag ID (0 for notes)
+        { name: 'keap_tag_category', type: 'STRING', mode: 'NULLABLE' }, // e.g., 'CustomerHub', 'Products Purchased'
         { name: 'active', type: 'BOOLEAN', mode: 'NULLABLE' },
         { name: 'created_at', type: 'TIMESTAMP', mode: 'NULLABLE' },
         { name: 'updated_at', type: 'TIMESTAMP', mode: 'NULLABLE' },
