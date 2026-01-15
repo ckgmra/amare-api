@@ -72,3 +72,37 @@ export const VALID_REFUND_TYPES = ['RFND', 'CGBK', 'INSF', 'TEST_RFND'];
 export function isTestTransaction(transactionType: string): boolean {
   return transactionType.includes('TEST');
 }
+
+/**
+ * Parse ClickBank timestamp format (YYYYMMDDTHHMMSS±HHMM) to BigQuery-compatible format
+ * Example input: '20260115T141003-0800'
+ * Example output: '2026-01-15 14:10:03'
+ *
+ * Returns null if parsing fails to avoid breaking the entire IPN
+ */
+export function parseClickbankTimestamp(timestamp: string | undefined): string | null {
+  if (!timestamp) {
+    return null;
+  }
+
+  try {
+    // ClickBank format: YYYYMMDDTHHMMSS±HHMM
+    // Example: 20260115T141003-0800
+    const match = timestamp.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})([+-]\d{4})$/);
+
+    if (!match) {
+      logger.warn({ timestamp }, 'Could not parse ClickBank timestamp format');
+      return null;
+    }
+
+    const [, year, month, day, hour, minute, second] = match;
+
+    // Format as YYYY-MM-DD HH:MM:SS (BigQuery TIMESTAMP format)
+    const formatted = `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+
+    return formatted;
+  } catch (error) {
+    logger.error({ error, timestamp }, 'Error parsing ClickBank timestamp');
+    return null;
+  }
+}

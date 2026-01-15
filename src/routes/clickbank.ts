@@ -5,6 +5,7 @@ import {
   decryptClickbankNotification,
   isEncryptedFormat,
   isTestTransaction,
+  parseClickbankTimestamp,
 } from '../services/clickbank.js';
 import { keapClient } from '../services/keap.js';
 import { bigQueryClient } from '../services/bigquery.js';
@@ -51,9 +52,17 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
 
     let ipnData: ClickbankIpnDecrypted | null = null;
     let isEncrypted = false;
+    let rawRequestBody: string | null = null;
 
     try {
       const body = request.body;
+
+      // Capture raw body for error logging
+      try {
+        rawRequestBody = JSON.stringify(body);
+      } catch (e) {
+        rawRequestBody = String(body);
+      }
 
       // Check if this is encrypted v6.0+ format
       if (isEncryptedFormat(body)) {
@@ -168,7 +177,7 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
         amount: ipnData.totalOrderAmount || null,
         currency: ipnData.currency || 'USD',
         affiliate: ipnData.affiliate || null,
-        clickbank_timestamp: ipnData.transactionTime || null,
+        clickbank_timestamp: parseClickbankTimestamp(ipnData.transactionTime),
         raw_payload: JSON.stringify(ipnData),
         is_test: isTest,
         is_encrypted: isEncrypted,
@@ -235,14 +244,17 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
       return reply.status(200).send('OK');
     } catch (error) {
       reqLogger.error({ error }, 'ClickBank IPN processing error');
+
+      // Always log to BigQuery even on catastrophic failures
+      // Use raw request body if ipnData parsing failed
       const transaction = createTransaction({
         receipt: ipnData?.receipt || '',
         transactionType: ipnData?.transactionType || 'UNKNOWN',
         brand: ipnData?.vendor?.toLowerCase() || '',
         email: ipnData?.email || '',
         productId: ipnData?.itemNo || '',
-        rawPayload: ipnData ? JSON.stringify(ipnData) : null,
-        isTest: false,
+        rawPayload: rawRequestBody || (ipnData ? JSON.stringify(ipnData) : null),
+        isTest: ipnData ? isTestTransaction(ipnData.transactionType) : false,
         isEncrypted,
         sourceIp,
         userAgent,
@@ -250,7 +262,21 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
         errorMessage: error instanceof Error ? error.message : 'Unknown error',
         now,
       });
-      await bigQueryClient.logTransaction(transaction);
+
+      try {
+        await bigQueryClient.logTransaction(transaction);
+      } catch (bqError) {
+        // If even BigQuery logging fails, log to console/CloudWatch
+        reqLogger.error(
+          {
+            originalError: error,
+            bigQueryError: bqError,
+            transaction
+          },
+          'Failed to log error transaction to BigQuery'
+        );
+      }
+
       return reply.status(200).send('OK');
     }
   });
