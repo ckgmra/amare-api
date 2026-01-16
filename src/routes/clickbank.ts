@@ -6,6 +6,10 @@ import {
   isEncryptedFormat,
   isTestTransaction,
   parseClickbankTimestamp,
+  extractEmail,
+  extractFirstName,
+  extractLastName,
+  extractProductId,
 } from '../services/clickbank.js';
 import { keapClient } from '../services/keap.js';
 import { bigQueryClient } from '../services/bigquery.js';
@@ -112,8 +116,10 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
       const transactionType = ipnData.transactionType;
       const vendor = ipnData.vendor?.toLowerCase() || '';
       const receipt = ipnData.receipt;
-      const email = ipnData.email || '';
-      const productId = ipnData.itemNo || '';
+      const email = extractEmail(ipnData);
+      const firstName = extractFirstName(ipnData);
+      const lastName = extractLastName(ipnData);
+      const productId = extractProductId(ipnData);
       const isTest = isTestTransaction(transactionType);
 
       reqLogger.info(
@@ -171,8 +177,8 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
         transaction_type: transactionType,
         brand: vendor,
         email,
-        first_name: ipnData.firstName || null,
-        last_name: ipnData.lastName || null,
+        first_name: firstName || null,
+        last_name: lastName || null,
         product_id: productId,
         amount: ipnData.totalOrderAmount || null,
         currency: ipnData.currency || 'USD',
@@ -251,8 +257,8 @@ export async function clickbankRoutes(fastify: FastifyInstance) {
         receipt: ipnData?.receipt || '',
         transactionType: ipnData?.transactionType || 'UNKNOWN',
         brand: ipnData?.vendor?.toLowerCase() || '',
-        email: ipnData?.email || '',
-        productId: ipnData?.itemNo || '',
+        email: ipnData ? extractEmail(ipnData) : '',
+        productId: ipnData ? extractProductId(ipnData) : '',
         rawPayload: rawRequestBody || (ipnData ? JSON.stringify(ipnData) : null),
         isTest: ipnData ? isTestTransaction(ipnData.transactionType) : false,
         isEncrypted,

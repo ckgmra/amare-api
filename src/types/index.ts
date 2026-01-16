@@ -60,6 +60,28 @@ export interface ClickbankIpnDecrypted {
   totalOrderAmount?: number;
   currency?: string;
   affiliate?: string;
+  // v8+ encrypted format has nested customer object
+  customer?: {
+    shipping?: {
+      email?: string;
+      firstName?: string;
+      lastName?: string;
+      fullName?: string;
+    };
+    billing?: {
+      email?: string;
+      firstName?: string;
+      lastName?: string;
+      fullName?: string;
+    };
+  };
+  // v8+ has lineItems array
+  lineItems?: Array<{
+    itemNo?: string;
+    productTitle?: string;
+    accountAmount?: number;
+    [key: string]: unknown;
+  }>;
   [key: string]: unknown;
 }
 

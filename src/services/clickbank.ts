@@ -106,3 +106,81 @@ export function parseClickbankTimestamp(timestamp: string | undefined): string |
     return null;
   }
 }
+
+/**
+ * Extract email from ClickBank IPN data
+ * Handles both legacy format (top-level email field) and v8+ format (nested customer object)
+ */
+export function extractEmail(ipnData: ClickbankIpnDecrypted): string {
+  // Try top-level email first (legacy format)
+  if (ipnData.email) {
+    return ipnData.email;
+  }
+
+  // Try v8+ nested customer object
+  if (ipnData.customer?.shipping?.email) {
+    return ipnData.customer.shipping.email;
+  }
+
+  if (ipnData.customer?.billing?.email) {
+    return ipnData.customer.billing.email;
+  }
+
+  return '';
+}
+
+/**
+ * Extract first name from ClickBank IPN data
+ */
+export function extractFirstName(ipnData: ClickbankIpnDecrypted): string | undefined {
+  if (ipnData.firstName) {
+    return ipnData.firstName;
+  }
+
+  if (ipnData.customer?.shipping?.firstName) {
+    return ipnData.customer.shipping.firstName;
+  }
+
+  if (ipnData.customer?.billing?.firstName) {
+    return ipnData.customer.billing.firstName;
+  }
+
+  return undefined;
+}
+
+/**
+ * Extract last name from ClickBank IPN data
+ */
+export function extractLastName(ipnData: ClickbankIpnDecrypted): string | undefined {
+  if (ipnData.lastName) {
+    return ipnData.lastName;
+  }
+
+  if (ipnData.customer?.shipping?.lastName) {
+    return ipnData.customer.shipping.lastName;
+  }
+
+  if (ipnData.customer?.billing?.lastName) {
+    return ipnData.customer.billing.lastName;
+  }
+
+  return undefined;
+}
+
+/**
+ * Extract product ID from ClickBank IPN data
+ * Handles both legacy format (top-level itemNo) and v8+ format (lineItems array)
+ */
+export function extractProductId(ipnData: ClickbankIpnDecrypted): string {
+  // Try top-level itemNo first (legacy format)
+  if (ipnData.itemNo) {
+    return ipnData.itemNo;
+  }
+
+  // Try v8+ lineItems array - get first item's itemNo
+  if (ipnData.lineItems && ipnData.lineItems.length > 0 && ipnData.lineItems[0].itemNo) {
+    return ipnData.lineItems[0].itemNo;
+  }
+
+  return '';
+}
