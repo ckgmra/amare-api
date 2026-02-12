@@ -1,5 +1,5 @@
 import { BigQuery } from '@google-cloud/bigquery';
-import type { TagAction, ClickbankTransaction, SubscriberQueueEntry } from '../types/index.js';
+import type { TagAction, ClickbankTransaction, SubscriberQueueEntry, TrackingContextRecord, MetaQueueRecord } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 class BigQueryClient {
@@ -10,6 +10,8 @@ class BigQueryClient {
   private transactionsTable: string;
   private subscriberQueueTable: string;
   private subscriberResultsTable: string;
+  private trackingContextTable: string;
+  private metaCapiQueueTable: string;
 
   constructor() {
     this.projectId = process.env.GCP_PROJECT_ID || 'watchful-force-477418-b9';
@@ -20,6 +22,8 @@ class BigQueryClient {
     this.subscriberQueueTable =
       process.env.BIGQUERY_TABLE_SUBSCRIBER_QUEUE || 'subscriber_queue';
     this.subscriberResultsTable = 'subscriber_processing_results';
+    this.trackingContextTable = 'tracking_context';
+    this.metaCapiQueueTable = 'meta_capi_queue';
 
     this.client = new BigQuery({
       projectId: this.projectId,
@@ -259,6 +263,135 @@ class BigQueryClient {
       logger.info({ id, keapContactId, success: !error }, 'Transaction status updated');
     } catch (err) {
       logger.error({ error: err, id }, 'Failed to update transaction status');
+    }
+  }
+
+  /**
+   * Insert a tracking context record (append-only).
+   * Fire-and-forget — caller should .catch() errors.
+   */
+  async insertTrackingContext(record: TrackingContextRecord): Promise<void> {
+    try {
+      const tableRef = this.client.dataset(this.dataset).table(this.trackingContextTable);
+      await tableRef.insert([record]);
+      logger.info({ email: record.email, brand: record.brand }, 'Tracking context inserted');
+    } catch (error) {
+      const bqError = error as { errors?: Array<{ errors: unknown[] }> };
+      if (bqError.errors) {
+        logger.error({ errors: bqError.errors }, 'BigQuery tracking context insert errors');
+      } else {
+        logger.error({ error }, 'Failed to insert tracking context');
+      }
+    }
+  }
+
+  /**
+   * Look up tracking context for a contact.
+   * Step 1: by keap_contact_id (WHERE pixel_id IS NOT NULL).
+   * Step 2: fallback by email.
+   * Returns null if nothing found.
+   */
+  async lookupTrackingContext(
+    keapContactId: string | null,
+    email: string | null
+  ): Promise<TrackingContextRecord | null> {
+    try {
+      // Step 1: Try by keap_contact_id
+      if (keapContactId) {
+        const query1 = `
+          SELECT *
+          FROM \`${this.projectId}.${this.dataset}.${this.trackingContextTable}\`
+          WHERE keap_contact_id = @keapContactId
+            AND pixel_id IS NOT NULL
+          ORDER BY created_at DESC
+          LIMIT 1
+        `;
+        const [rows1] = await this.client.query({
+          query: query1,
+          params: { keapContactId },
+        });
+        if (rows1.length > 0) {
+          return rows1[0] as TrackingContextRecord;
+        }
+      }
+
+      // Step 2: Fallback by email
+      if (email) {
+        const query2 = `
+          SELECT *
+          FROM \`${this.projectId}.${this.dataset}.${this.trackingContextTable}\`
+          WHERE email = @email
+            AND pixel_id IS NOT NULL
+          ORDER BY created_at DESC
+          LIMIT 1
+        `;
+        const [rows2] = await this.client.query({
+          query: query2,
+          params: { email },
+        });
+        if (rows2.length > 0) {
+          return rows2[0] as TrackingContextRecord;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      logger.error({ error, keapContactId, email }, 'Failed to lookup tracking context');
+      return null;
+    }
+  }
+
+  /**
+   * Insert a meta CAPI queue row (append-only).
+   * Used for both initial PENDING and subsequent status rows.
+   */
+  async insertMetaQueueRow(record: MetaQueueRecord): Promise<void> {
+    try {
+      const tableRef = this.client.dataset(this.dataset).table(this.metaCapiQueueTable);
+      await tableRef.insert([record]);
+      logger.info(
+        { queueId: record.queue_id, status: record.status, attempt: record.attempt_count },
+        'Meta CAPI queue row inserted'
+      );
+    } catch (error) {
+      const bqError = error as { errors?: Array<{ errors: unknown[] }> };
+      if (bqError.errors) {
+        logger.error({ errors: bqError.errors }, 'BigQuery meta queue insert errors');
+      } else {
+        logger.error({ error }, 'Failed to insert meta queue row');
+      }
+    }
+  }
+
+  /**
+   * Get retryable meta CAPI events.
+   * Uses WITH latest AS (ARRAY_AGG ... ORDER BY updated_at DESC LIMIT 1) pattern
+   * to find the most recent status for each queue_id.
+   */
+  async getRetryableMetaEvents(limit: number = 50): Promise<MetaQueueRecord[]> {
+    try {
+      const query = `
+        WITH latest AS (
+          SELECT AS VALUE ARRAY_AGG(t ORDER BY updated_at DESC LIMIT 1)[OFFSET(0)]
+          FROM \`${this.projectId}.${this.dataset}.${this.metaCapiQueueTable}\` t
+          GROUP BY queue_id
+        )
+        SELECT * FROM latest
+        WHERE status IN ('PENDING', 'FAILED')
+          AND next_attempt_at <= CURRENT_TIMESTAMP()
+        ORDER BY next_attempt_at ASC
+        LIMIT @limit
+      `;
+
+      const [rows] = await this.client.query({
+        query,
+        params: { limit },
+      });
+
+      return rows as MetaQueueRecord[];
+    } catch (error) {
+      logger.error({ error }, 'Failed to get retryable meta events');
+      return [];
     }
   }
 

@@ -6,7 +6,9 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { subscribeRoutes } from './routes/subscribe.js';
 import { clickbankRoutes } from './routes/clickbank.js';
+import { keapWebhookRoutes } from './routes/keap-webhook.js';
 import { bigQueryClient } from './services/bigquery.js';
+import { startReplayWorker } from './services/metaQueue.js';
 import { logger } from './utils/logger.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
@@ -24,7 +26,7 @@ async function buildApp() {
   await fastify.register(cors, {
     origin: NODE_ENV === 'development' ? true : corsOrigins,
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Webhook-Secret'],
     credentials: true,
   });
 
@@ -79,6 +81,7 @@ async function buildApp() {
   // Register routes
   await fastify.register(subscribeRoutes);
   await fastify.register(clickbankRoutes);
+  await fastify.register(keapWebhookRoutes);
 
   // Error handler
   fastify.setErrorHandler((error, request, reply) => {
@@ -129,6 +132,11 @@ async function main() {
 
     await app.listen({ port: PORT, host: '0.0.0.0' });
     logger.info({ port: PORT }, `Server listening on port ${PORT}`);
+
+    // Start Meta CAPI replay worker (production only)
+    if (NODE_ENV !== 'development') {
+      startReplayWorker();
+    }
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : 'Unknown error';
     logger.error({ error: errMsg }, 'Failed to start server');

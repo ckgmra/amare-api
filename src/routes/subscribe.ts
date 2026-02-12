@@ -3,7 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { keapClient } from '../services/keap.js';
 import { bigQueryClient } from '../services/bigquery.js';
 import { SUPPORTED_BRANDS } from '../config/keapFields.js';
-import type { SubscriberQueueEntry } from '../types/index.js';
+import { sendMetaWithQueue } from '../services/metaQueue.js';
+import { metaCAPIClient } from '../services/meta.js';
+import type { SubscriberQueueEntry, TrackingContextRecord, MetaCAPIEvent, MetaQueueMetadata } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 // API key for authenticating requests from brand sites
@@ -29,6 +31,17 @@ interface SubscribeBody {
   customFields?: Record<string, string>;
   sourceUrl?: string;
   redirectSlug?: string;
+  eventId?: string;
+  fbp?: string;
+  fbc?: string;
+  fbclid?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_content?: string;
+  utm_term?: string;
+  pixelId?: string;
+  userAgent?: string;
 }
 
 interface SubscribeResponse {
@@ -56,6 +69,17 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
             },
             sourceUrl: { type: 'string', description: 'Original page URL where form was submitted' },
             redirectSlug: { type: 'string', description: 'Redirect path after signup (for forensic tracking)' },
+            eventId: { type: 'string', description: 'Event ID for Meta deduplication' },
+            fbp: { type: 'string', description: 'Meta _fbp cookie value' },
+            fbc: { type: 'string', description: 'Meta _fbc cookie value' },
+            fbclid: { type: 'string', description: 'Facebook click ID from URL' },
+            utm_source: { type: 'string' },
+            utm_medium: { type: 'string' },
+            utm_campaign: { type: 'string' },
+            utm_content: { type: 'string' },
+            utm_term: { type: 'string' },
+            pixelId: { type: 'string', description: 'Meta pixel ID for this brand' },
+            userAgent: { type: 'string', description: 'Browser user agent string' },
           },
         },
         response: {
@@ -105,7 +129,12 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        const { email, firstName, brand, tag, customFields, sourceUrl, redirectSlug } = request.body;
+        const {
+          email, firstName, brand, tag, customFields, sourceUrl, redirectSlug,
+          eventId, fbp, fbc, fbclid,
+          utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+          pixelId, userAgent: browserUA,
+        } = request.body;
 
         // Store raw payload for debugging
         const rawPayload = JSON.stringify(request.body);
@@ -214,6 +243,71 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
           processingError
         ).catch(bqError => {
           reqLogger.error({ queueId: queueEntry.id, error: bqError }, 'Failed to record processing result');
+        });
+
+        // Insert tracking context + send Meta CAPI (fire-and-forget)
+        const trackingBlock = async () => {
+          try {
+            const keapContactIdStr = contactId ? String(contactId) : null;
+
+            // Insert tracking context row
+            const trackingRecord: TrackingContextRecord = {
+              created_at: now,
+              brand: brand.toUpperCase(),
+              email,
+              keap_contact_id: keapContactIdStr,
+              pixel_id: pixelId || null,
+              fbp: fbp || null,
+              fbc: fbc || null,
+              fbclid: fbclid || null,
+              event_id: eventId || null,
+              utm_source: utm_source || null,
+              utm_medium: utm_medium || null,
+              utm_campaign: utm_campaign || null,
+              utm_content: utm_content || null,
+              utm_term: utm_term || null,
+              source_url: resolvedSourceUrl,
+              user_agent: browserUA || userAgent,
+              ip_address: ipAddress,
+            };
+            await bigQueryClient.insertTrackingContext(trackingRecord);
+
+            // Send Meta CAPI Subscribe event if pixelId present
+            if (pixelId) {
+              const hashedUserData = metaCAPIClient.hashUserData({ em: email });
+              const userData: Record<string, unknown> = { ...hashedUserData };
+              if (fbp) userData.fbp = fbp;
+              if (fbc) userData.fbc = fbc;
+              if (ipAddress) userData.client_ip_address = ipAddress;
+              if (browserUA || userAgent) userData.client_user_agent = browserUA || userAgent;
+
+              const capiEvent: MetaCAPIEvent = {
+                event_name: 'Subscribe',
+                event_time: Math.floor(Date.now() / 1000),
+                action_source: 'website',
+                event_source_url: resolvedSourceUrl || undefined,
+                event_id: eventId || undefined,
+                user_data: userData,
+              };
+
+              const queueMetadata: MetaQueueMetadata = {
+                source: 'subscribe',
+                brand: brand.toLowerCase(),
+                eventName: 'Subscribe',
+                emailHash: hashedUserData.em || null,
+                keapContactId: keapContactIdStr,
+                eventId: eventId || null,
+                pixelId,
+              };
+
+              await sendMetaWithQueue(queueMetadata, capiEvent);
+            }
+          } catch (err) {
+            reqLogger.error({ err }, 'Tracking context / Meta CAPI failed');
+          }
+        };
+        trackingBlock().catch(err => {
+          reqLogger.error({ err }, 'Tracking block error');
         });
 
         // Return success immediately

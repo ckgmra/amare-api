@@ -116,6 +116,85 @@ export interface SubscriberQueueEntry {
   processed_at: string | null;
 }
 
+// Tracking context record for BigQuery (append-only, stores Meta pixel + UTM data)
+export interface TrackingContextRecord {
+  created_at: string;
+  brand: string;
+  email: string;
+  keap_contact_id: string | null;
+  pixel_id: string | null;
+  fbp: string | null;
+  fbc: string | null;
+  fbclid: string | null;
+  event_id: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  utm_content: string | null;
+  utm_term: string | null;
+  source_url: string | null;
+  user_agent: string | null;
+  ip_address: string | null;
+}
+
+// Meta CAPI event payload
+export interface MetaCAPIEvent {
+  event_name: string;
+  event_time: number;
+  action_source: string;
+  event_source_url?: string;
+  event_id?: string;
+  user_data: Record<string, unknown>;
+  custom_data?: Record<string, unknown>;
+}
+
+// Structured return from Meta CAPI sendEvent
+export interface MetaSendResult {
+  success: boolean;
+  httpStatus?: number;
+  responseJson?: string;
+  latencyMs: number;
+  error?: string;
+}
+
+// Meta CAPI queue record for BigQuery (append-only status rows)
+export interface MetaQueueRecord {
+  created_at: string;
+  updated_at: string;
+  queue_id: string;
+  source: string;
+  brand: string;
+  event_name: string;
+  email_hash: string | null;
+  keap_contact_id: string | null;
+  order_id: string | null;
+  event_id: string | null;
+  pixel_id: string | null;
+  event_time: number;
+  action_source: string;
+  event_source_url: string | null;
+  capi_payload_json: string;
+  status: 'PENDING' | 'SENT' | 'FAILED' | 'DEAD';
+  attempt_count: number;
+  next_attempt_at: string;
+  last_http_status: number | null;
+  last_error_message: string | null;
+  last_response_json: string | null;
+  last_latency_ms: number | null;
+}
+
+// Metadata passed alongside CAPI payload for queue tracking
+export interface MetaQueueMetadata {
+  source: 'subscribe' | 'purchase';
+  brand: string;
+  eventName: string;
+  emailHash: string | null;
+  keapContactId?: string | null;
+  orderId?: string | null;
+  eventId?: string | null;
+  pixelId: string;
+}
+
 // Clickbank transaction record for BigQuery (consolidated: audit log + processing queue)
 export interface ClickbankTransaction {
   id: string;
