@@ -9,11 +9,17 @@ import type { MetaCAPIEvent, MetaQueueMetadata, TrackingContextRecord } from '..
 /**
  * Keap REST Hook payload format:
  * - Verification: POST with X-Hook-Secret header (no body or empty body)
- * - Event: POST with { event_key: string, object_keys: number[] }
+ * - Event: POST with { event_key: string, object_keys: Array<{ id, apiUrl, timestamp }> }
  */
+interface KeapObjectKey {
+  id: number;
+  apiUrl?: string;
+  timestamp?: string;
+}
+
 interface KeapHookEventBody {
   event_key?: string;
-  object_keys?: number[];
+  object_keys?: KeapObjectKey[];
   [key: string]: unknown;
 }
 
@@ -69,8 +75,9 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
           return ack();
         }
 
-        // Process each payment ID
-        for (const paymentId of object_keys) {
+        // Process each payment — object_keys are objects with { id, apiUrl, timestamp }
+        for (const objectKey of object_keys) {
+          const paymentId = typeof objectKey === 'object' ? objectKey.id : objectKey;
           try {
             await processPayment(paymentId, reqLogger);
           } catch (err) {
