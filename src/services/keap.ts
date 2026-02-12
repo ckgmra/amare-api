@@ -546,6 +546,17 @@ class KeapClient {
       throw error;
     }
   }
+  /**
+   * Create a REST hook subscription
+   */
+  async createHook(eventKey: string, hookUrl: string, verifyToken: string): Promise<unknown> {
+    const response = await this.axiosInstance.post('/hooks', {
+      eventKey,
+      hookUrl,
+      verifyToken,
+    });
+    return response.data;
+  }
 }
 
 export const keapClient = new KeapClient();

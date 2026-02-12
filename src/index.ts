@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { subscribeRoutes } from './routes/subscribe.js';
 import { clickbankRoutes } from './routes/clickbank.js';
 import { keapWebhookRoutes } from './routes/keap-webhook.js';
+import { keapClient } from './services/keap.js';
 import { bigQueryClient } from './services/bigquery.js';
 import { startReplayWorker } from './services/metaQueue.js';
 import { logger } from './utils/logger.js';
@@ -82,6 +83,17 @@ async function buildApp() {
   await fastify.register(subscribeRoutes);
   await fastify.register(clickbankRoutes);
   await fastify.register(keapWebhookRoutes);
+
+  // Temporary admin endpoint for creating Keap hooks
+  fastify.post('/admin/create-hook', async (request, reply) => {
+    const apiKey = request.headers['x-api-key'];
+    if (!process.env.SUBSCRIBE_API_KEY || apiKey !== process.env.SUBSCRIBE_API_KEY) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+    const { eventKey, hookUrl, verifyToken } = request.body as Record<string, string>;
+    const result = await keapClient.createHook(eventKey, hookUrl, verifyToken);
+    return reply.send(result);
+  });
 
   // Error handler
   fastify.setErrorHandler((error, request, reply) => {
