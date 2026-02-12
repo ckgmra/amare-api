@@ -549,13 +549,88 @@ class KeapClient {
   /**
    * Create a REST hook subscription
    */
-  async createHook(eventKey: string, hookUrl: string, verifyToken: string): Promise<unknown> {
+  async createHook(eventKey: string, hookUrl: string): Promise<unknown> {
     const response = await this.axiosInstance.post('/hooks', {
       eventKey,
       hookUrl,
-      verifyToken,
     });
     return response.data;
+  }
+
+  /**
+   * Verify a REST hook by key
+   */
+  async verifyHook(hookKey: number): Promise<unknown> {
+    const response = await this.axiosInstance.post(`/hooks/${hookKey}/verify`);
+    return response.data;
+  }
+
+  /**
+   * Get a contact by ID
+   */
+  async getContactById(contactId: number): Promise<KeapContact | null> {
+    try {
+      const response = await this.axiosInstance.get(`/contacts/${contactId}`, {
+        params: {
+          optional_properties: 'custom_fields',
+        },
+      });
+      return response.data;
+    } catch (error) {
+      const axiosErr = error as { response?: { status?: number } };
+      if (axiosErr.response?.status === 404) return null;
+      logger.error({ error, contactId }, 'Failed to get contact by ID');
+      throw error;
+    }
+  }
+
+  /**
+   * Get a payment by ID (from Keap REST API)
+   * Returns payment details including invoice_id, contact_id, amount, etc.
+   */
+  async getPayment(paymentId: number): Promise<Record<string, unknown> | null> {
+    try {
+      const response = await this.axiosInstance.get(`/orders/${paymentId}/payments`);
+      // The payments endpoint returns an array — but we can also try the transaction endpoint
+      return response.data;
+    } catch (error) {
+      const axiosErr = error as { response?: { status?: number } };
+      if (axiosErr.response?.status === 404) return null;
+      logger.error({ error, paymentId }, 'Failed to get payment by ID');
+      throw error;
+    }
+  }
+
+  /**
+   * Get an order (invoice) by ID
+   * Returns order details including contact, line items, amounts
+   */
+  async getOrder(orderId: number): Promise<Record<string, unknown> | null> {
+    try {
+      const response = await this.axiosInstance.get(`/orders/${orderId}`);
+      return response.data;
+    } catch (error) {
+      const axiosErr = error as { response?: { status?: number } };
+      if (axiosErr.response?.status === 404) return null;
+      logger.error({ error, orderId }, 'Failed to get order by ID');
+      throw error;
+    }
+  }
+
+  /**
+   * Get a transaction (payment) by ID
+   * Returns payment details including contact_id, order_ids, amount
+   */
+  async getTransaction(transactionId: number): Promise<Record<string, unknown> | null> {
+    try {
+      const response = await this.axiosInstance.get(`/transactions/${transactionId}`);
+      return response.data;
+    } catch (error) {
+      const axiosErr = error as { response?: { status?: number } };
+      if (axiosErr.response?.status === 404) return null;
+      logger.error({ error, transactionId }, 'Failed to get transaction by ID');
+      throw error;
+    }
   }
 }
 

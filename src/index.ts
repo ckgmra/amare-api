@@ -84,14 +84,24 @@ async function buildApp() {
   await fastify.register(clickbankRoutes);
   await fastify.register(keapWebhookRoutes);
 
-  // Temporary admin endpoint for creating Keap hooks
+  // Temporary admin endpoint for creating/verifying Keap hooks
   fastify.post('/admin/create-hook', async (request, reply) => {
     const apiKey = request.headers['x-api-key'];
     if (!process.env.SUBSCRIBE_API_KEY || apiKey !== process.env.SUBSCRIBE_API_KEY) {
       return reply.status(401).send({ error: 'Unauthorized' });
     }
-    const { eventKey, hookUrl, verifyToken } = request.body as Record<string, string>;
-    const result = await keapClient.createHook(eventKey, hookUrl, verifyToken);
+    const { eventKey, hookUrl } = request.body as Record<string, string>;
+    const result = await keapClient.createHook(eventKey, hookUrl);
+    return reply.send(result);
+  });
+
+  fastify.post('/admin/verify-hook', async (request, reply) => {
+    const apiKey = request.headers['x-api-key'];
+    if (!process.env.SUBSCRIBE_API_KEY || apiKey !== process.env.SUBSCRIBE_API_KEY) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+    const { hookKey } = request.body as Record<string, number>;
+    const result = await keapClient.verifyHook(hookKey);
     return reply.send(result);
   });
 
