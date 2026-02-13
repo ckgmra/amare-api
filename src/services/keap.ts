@@ -254,6 +254,41 @@ class KeapClient {
     }
   }
 
+  /**
+   * Get tags applied to a contact.
+   * Returns array of { id, name } objects.
+   */
+  async getContactTags(contactId: number): Promise<Array<{ id: number; name: string }>> {
+    try {
+      const response = await this.axiosInstance.get(`/contacts/${contactId}/tags`);
+      const tags = response.data.tags || [];
+      return tags.map((t: { tag: { id: number; name: string } }) => ({
+        id: t.tag.id,
+        name: t.tag.name,
+      }));
+    } catch (error) {
+      logger.error({ error, contactId }, 'Failed to get contact tags');
+      return [];
+    }
+  }
+
+  /**
+   * Determine brand from a contact's tags.
+   * Scans tag names for brand prefixes (HRYW-, FLO-, CHKH-, GKH-).
+   */
+  async detectBrandFromTags(contactId: number): Promise<string | null> {
+    const tags = await this.getContactTags(contactId);
+    const brandPrefixes = ['HRYW', 'FLO', 'CHKH', 'GKH'];
+    for (const tag of tags) {
+      for (const prefix of brandPrefixes) {
+        if (tag.name.toUpperCase().startsWith(prefix + '-') || tag.name.toUpperCase() === prefix) {
+          return prefix.toLowerCase();
+        }
+      }
+    }
+    return null;
+  }
+
   async applyTags(contactId: number, tagIds: number[]): Promise<void> {
     if (tagIds.length === 0) {
       logger.debug({ contactId }, 'No tags to apply');

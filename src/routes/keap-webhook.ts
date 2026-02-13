@@ -180,8 +180,14 @@ async function processPayment(
     if (brand) brand = brand.toLowerCase();
   }
 
+  // Fallback: detect brand from contact's Keap tags (e.g., HRYW-WebSub, FLO-Customer)
+  if (!brand && contactId) {
+    brand = await keapClient.detectBrandFromTags(contactId);
+    if (brand) reqLogger.info({ contactId, brand }, 'Brand detected from Keap tags');
+  }
+
   if (!brand) {
-    reqLogger.info({ contactId, email }, 'Cannot determine brand for purchase — skipping CAPI');
+    reqLogger.warn({ contactId, email }, 'Cannot determine brand for purchase — skipping CAPI');
     return;
   }
 
