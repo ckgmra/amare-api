@@ -96,8 +96,9 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
 
 /**
  * Process a single payment from Keap webhook.
- * Fetches payment details from Keap API, looks up tracking context,
- * and sends a Purchase CAPI event if tracking data exists.
+ * Fetches payment details from Keap API, looks up tracking context
+ * for enrichment, and always sends a Purchase CAPI event as long as
+ * we can determine the brand/pixel.
  */
 async function processPayment(
   paymentId: number,
@@ -132,6 +133,7 @@ async function processPayment(
   const email = contact.email_addresses?.[0]?.email || null;
   const firstName = contact.given_name || null;
   const lastName = contact.family_name || null;
+  const phone = (contact as unknown as Record<string, unknown>).phone1 as string | undefined;
 
   reqLogger.info(
     { contactId, email, firstName, paymentId, amount },
@@ -140,19 +142,11 @@ async function processPayment(
 
   const contactIdStr = String(contactId);
 
-  // Look up tracking context
+  // Look up tracking context for enrichment (fbp, fbc, pixel_id, etc.)
   const trackingCtx = await bigQueryClient.lookupTrackingContext(contactIdStr, email);
 
-  if (!trackingCtx) {
-    reqLogger.info(
-      { contactId, email },
-      'No tracking context found for purchase — skipping CAPI'
-    );
-    return;
-  }
-
-  // If we found by email but tracking row had no keap_contact_id, backfill
-  if (contactIdStr && !trackingCtx.keap_contact_id) {
+  // If we found tracking context by email but it had no keap_contact_id, backfill
+  if (trackingCtx && contactIdStr && !trackingCtx.keap_contact_id) {
     const backfillRecord: TrackingContextRecord = {
       created_at: new Date().toISOString(),
       brand: trackingCtx.brand,
@@ -177,8 +171,26 @@ async function processPayment(
     });
   }
 
-  if (!trackingCtx.pixel_id) {
-    reqLogger.info('Tracking context found but no pixel_id — skipping CAPI');
+  // Determine brand + pixel_id — tracking context first, then fallback to subscriber_queue + env var
+  let brand: string | null = trackingCtx?.brand?.toLowerCase() || null;
+  let pixelId: string | null = trackingCtx?.pixel_id || null;
+
+  if (!brand && email) {
+    brand = await bigQueryClient.lookupBrandByEmail(email);
+    if (brand) brand = brand.toLowerCase();
+  }
+
+  if (!brand) {
+    reqLogger.info({ contactId, email }, 'Cannot determine brand for purchase — skipping CAPI');
+    return;
+  }
+
+  if (!pixelId) {
+    pixelId = metaCAPIClient.getPixelId(brand);
+  }
+
+  if (!pixelId) {
+    reqLogger.info({ contactId, brand }, 'No pixel_id available for brand — skipping CAPI');
     return;
   }
 
@@ -209,15 +221,16 @@ async function processPayment(
     em: email,
     fn: firstName,
     ln: lastName,
-    ph: null,
+    ph: phone || null,
     external_id: contactIdStr,
   });
 
   const userData: Record<string, unknown> = { ...hashedUserData };
-  if (trackingCtx.fbp) userData.fbp = trackingCtx.fbp;
-  if (trackingCtx.fbc) userData.fbc = trackingCtx.fbc;
-  if (trackingCtx.ip_address) userData.client_ip_address = trackingCtx.ip_address;
-  if (trackingCtx.user_agent) userData.client_user_agent = trackingCtx.user_agent;
+  // Enrich with tracking context if available
+  if (trackingCtx?.fbp) userData.fbp = trackingCtx.fbp;
+  if (trackingCtx?.fbc) userData.fbc = trackingCtx.fbc;
+  if (trackingCtx?.ip_address) userData.client_ip_address = trackingCtx.ip_address;
+  if (trackingCtx?.user_agent) userData.client_user_agent = trackingCtx.user_agent;
 
   const customData: Record<string, unknown> = {};
   if (amount != null) customData.value = amount;
@@ -229,20 +242,19 @@ async function processPayment(
     event_name: 'Purchase',
     event_time: Math.floor(Date.now() / 1000),
     action_source: 'website',
-    event_source_url: trackingCtx.source_url || undefined,
-    // No event_id for server-only Purchase events
+    event_source_url: trackingCtx?.source_url || undefined,
     user_data: userData,
     custom_data: customData,
   };
 
   const queueMetadata: MetaQueueMetadata = {
     source: 'purchase',
-    brand: trackingCtx.brand.toLowerCase(),
+    brand,
     eventName: 'Purchase',
     emailHash: hashedUserData.em || null,
     keapContactId: contactIdStr,
     orderId,
-    pixelId: trackingCtx.pixel_id,
+    pixelId,
   };
 
   // Send via durable queue (fire-and-forget from webhook perspective)
@@ -251,7 +263,7 @@ async function processPayment(
   });
 
   reqLogger.info(
-    { contactId, orderId, pixelId: trackingCtx.pixel_id },
+    { contactId, orderId, pixelId, brand, hasTrackingContext: !!trackingCtx },
     'Purchase CAPI event queued'
   );
 }

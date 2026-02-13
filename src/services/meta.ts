@@ -111,9 +111,19 @@ export async function sendEvent(params: {
   }
 }
 
+/**
+ * Get Meta pixel ID for a brand from env vars.
+ * Format: META_PIXEL_ID_{BRAND} (e.g., META_PIXEL_ID_FLO)
+ */
+export function getPixelId(brand: string): string | null {
+  const key = `META_PIXEL_ID_${brand.toUpperCase()}`;
+  return process.env[key] || null;
+}
+
 export const metaCAPIClient = {
   sha256,
   hashUserData,
   getAccessToken,
+  getPixelId,
   sendEvent,
 };

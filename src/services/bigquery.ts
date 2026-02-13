@@ -395,6 +395,33 @@ class BigQueryClient {
     }
   }
 
+  /**
+   * Look up brand for a contact by email (from subscriber_queue).
+   * Returns the most recent brand, or null if never subscribed.
+   */
+  async lookupBrandByEmail(email: string): Promise<string | null> {
+    try {
+      const query = `
+        SELECT brand
+        FROM \`${this.projectId}.${this.dataset}.${this.subscriberQueueTable}\`
+        WHERE email = @email
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      const [rows] = await this.client.query({
+        query,
+        params: { email },
+      });
+      if (rows.length > 0) {
+        return rows[0].brand as string;
+      }
+      return null;
+    } catch (error) {
+      logger.error({ error, email }, 'Failed to lookup brand by email');
+      return null;
+    }
+  }
+
   async ensureTablesExist(): Promise<void> {
     try {
       const dataset = this.client.dataset(this.dataset);
