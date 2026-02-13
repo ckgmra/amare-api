@@ -272,9 +272,32 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
             };
             await bigQueryClient.insertTrackingContext(trackingRecord);
 
-            // Send Meta CAPI Subscribe event if pixelId present
-            if (pixelId) {
-              const hashedUserData = metaCAPIClient.hashUserData({ em: email });
+            // Send Meta CAPI Subscribe event
+            // Use pixelId from frontend, or fall back to env var for the brand
+            const resolvedPixelId = pixelId || metaCAPIClient.getPixelId(brand);
+            if (resolvedPixelId) {
+              // Enrich with Keap contact data if available (last name, phone from existing contacts)
+              let lastName: string | null = null;
+              let phone: string | null = null;
+              if (contactId) {
+                try {
+                  const keapContact = await keapClient.getContactById(contactId);
+                  if (keapContact) {
+                    lastName = keapContact.family_name || null;
+                    phone = (keapContact as unknown as Record<string, unknown>).phone1 as string || null;
+                  }
+                } catch {
+                  // Non-critical — proceed without extra fields
+                }
+              }
+
+              const hashedUserData = metaCAPIClient.hashUserData({
+                em: email,
+                fn: firstName,
+                ln: lastName,
+                ph: phone,
+                external_id: keapContactIdStr,
+              });
               const userData: Record<string, unknown> = { ...hashedUserData };
               if (fbp) userData.fbp = fbp;
               if (fbc) userData.fbc = fbc;
@@ -297,7 +320,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
                 emailHash: hashedUserData.em || null,
                 keapContactId: keapContactIdStr,
                 eventId: eventId || null,
-                pixelId,
+                pixelId: resolvedPixelId,
               };
 
               await sendMetaWithQueue(queueMetadata, capiEvent);
