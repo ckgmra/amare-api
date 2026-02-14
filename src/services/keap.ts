@@ -582,6 +582,27 @@ class KeapClient {
     }
   }
   /**
+   * List recent transactions for a contact, ordered newest first.
+   * Used to find transactions that had id=0 at webhook time.
+   */
+  async getRecentTransactionsForContact(contactId: number, limit: number = 10): Promise<Array<Record<string, unknown>>> {
+    try {
+      const response = await this.axiosInstance.get('/transactions', {
+        params: {
+          contact_id: contactId,
+          limit,
+          order: 'date',
+          order_direction: 'descending',
+        },
+      });
+      return response.data.transactions || [];
+    } catch (error) {
+      logger.error({ error, contactId }, 'Failed to get recent transactions for contact');
+      return [];
+    }
+  }
+
+  /**
    * Create a REST hook subscription
    */
   async createHook(eventKey: string, hookUrl: string): Promise<unknown> {

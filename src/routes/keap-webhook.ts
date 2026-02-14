@@ -76,13 +76,49 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
         }
 
         // Process each payment — object_keys are objects with { id, apiUrl, timestamp }
+        // Payments with id=0 are deferred (Keap fires before transaction is ready)
+        const immediate: number[] = [];
+        const deferred: KeapObjectKey[] = [];
+
         for (const objectKey of object_keys) {
           const paymentId = typeof objectKey === 'object' ? objectKey.id : objectKey;
+          if (paymentId && paymentId > 0) {
+            immediate.push(paymentId);
+          } else {
+            deferred.push(typeof objectKey === 'object' ? objectKey : { id: 0 });
+          }
+        }
+
+        // Process ready payments immediately, track which transaction IDs we handled
+        // and capture the contactId for deferred payment lookups
+        const processedTxnIds = new Set<number>();
+        let knownContactId: number | null = null;
+
+        for (const paymentId of immediate) {
           try {
-            await processPayment(paymentId, reqLogger);
+            const contactId = await processPayment(paymentId, reqLogger);
+            processedTxnIds.add(paymentId);
+            if (contactId) knownContactId = contactId;
           } catch (err) {
             reqLogger.error({ err, paymentId }, 'Error processing payment');
           }
+        }
+
+        // Defer id=0 payments — retry in background after delays
+        // Uses the contactId from the first processed payment to find new transactions
+        if (deferred.length > 0 && knownContactId) {
+          reqLogger.info(
+            { count: deferred.length, knownContactId, processedTxnIds: [...processedTxnIds] },
+            'Deferring id=0 payments for background retry'
+          );
+          retryDeferredPayments(knownContactId, deferred.length, processedTxnIds, reqLogger).catch(err => {
+            reqLogger.error({ err }, 'Deferred payment retry failed');
+          });
+        } else if (deferred.length > 0) {
+          reqLogger.warn(
+            { count: deferred.length },
+            'Cannot retry deferred payments — no contactId from immediate payments'
+          );
         }
 
         return ack();
@@ -94,6 +130,72 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
   );
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Retry deferred payments (id=0) with backoff.
+ * Keap sometimes fires invoice.payment.add before the transaction ID is assigned
+ * (common with upsells). We retry 3 times: wait 10s, 20s, 30s.
+ *
+ * Strategy: Query the contact's recent transactions from Keap and process
+ * any we haven't already handled.
+ */
+async function retryDeferredPayments(
+  contactId: number,
+  expectedCount: number,
+  processedTxnIds: Set<number>,
+  reqLogger: typeof logger
+): Promise<void> {
+  const delays = [10000, 20000, 30000]; // 10s, 20s, 30s
+  const newlyProcessed = new Set<number>();
+
+  for (let i = 0; i < delays.length; i++) {
+    if (newlyProcessed.size >= expectedCount) break;
+
+    reqLogger.info(
+      { attempt: i + 1, delayMs: delays[i], contactId, remaining: expectedCount - newlyProcessed.size },
+      'Waiting to retry deferred payments'
+    );
+    await sleep(delays[i]);
+
+    try {
+      const recentTxns = await keapClient.getRecentTransactionsForContact(contactId, 10);
+
+      for (const txn of recentTxns) {
+        const txnId = txn.id as number;
+        if (!txnId || processedTxnIds.has(txnId) || newlyProcessed.has(txnId)) continue;
+
+        try {
+          await processPayment(txnId, reqLogger);
+          newlyProcessed.add(txnId);
+          reqLogger.info(
+            { txnId, contactId, attempt: i + 1 },
+            'Deferred payment (upsell) processed successfully'
+          );
+        } catch (err) {
+          reqLogger.warn({ err, txnId, attempt: i + 1 }, 'Deferred payment retry failed');
+        }
+      }
+    } catch (err) {
+      reqLogger.warn({ err, attempt: i + 1 }, 'Error querying recent transactions for deferred retry');
+    }
+  }
+
+  if (newlyProcessed.size < expectedCount) {
+    reqLogger.warn(
+      { contactId, expected: expectedCount, processed: newlyProcessed.size },
+      'Some deferred payments could not be resolved after all retries'
+    );
+  } else {
+    reqLogger.info(
+      { contactId, processed: newlyProcessed.size },
+      'All deferred payments resolved'
+    );
+  }
+}
+
 /**
  * Process a single payment from Keap webhook.
  * Fetches payment details from Keap API, looks up tracking context
@@ -103,12 +205,12 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
 async function processPayment(
   paymentId: number,
   reqLogger: typeof logger
-): Promise<void> {
+): Promise<number | null> {
   // Fetch the transaction/payment details from Keap
   const transaction = await keapClient.getTransaction(paymentId);
   if (!transaction) {
     reqLogger.warn({ paymentId }, 'Transaction not found in Keap');
-    return;
+    return null;
   }
 
   reqLogger.info({ paymentId, transaction }, 'Fetched transaction from Keap');
@@ -120,14 +222,14 @@ async function processPayment(
 
   if (!contactId) {
     reqLogger.warn({ paymentId }, 'No contact_id in transaction');
-    return;
+    return null;
   }
 
   // Fetch contact details for email + name
   const contact = await keapClient.getContactById(contactId);
   if (!contact) {
     reqLogger.warn({ contactId }, 'Contact not found in Keap');
-    return;
+    return contactId;
   }
 
   const email = contact.email_addresses?.[0]?.email || null;
@@ -188,7 +290,7 @@ async function processPayment(
 
   if (!brand) {
     reqLogger.warn({ contactId, email }, 'Cannot determine brand for purchase — skipping CAPI');
-    return;
+    return contactId;
   }
 
   if (!pixelId) {
@@ -197,7 +299,7 @@ async function processPayment(
 
   if (!pixelId) {
     reqLogger.info({ contactId, brand }, 'No pixel_id available for brand — skipping CAPI');
-    return;
+    return contactId;
   }
 
   // Fetch order details for line items if we have order IDs
@@ -272,4 +374,6 @@ async function processPayment(
     { contactId, orderId, pixelId, brand, hasTrackingContext: !!trackingCtx },
     'Purchase CAPI event queued'
   );
+
+  return contactId;
 }
