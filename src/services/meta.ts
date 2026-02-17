@@ -33,12 +33,11 @@ export function hashUserData(fields: {
 }
 
 /**
- * Get Meta access token for a brand from env vars.
- * Format: META_ACCESS_TOKEN_{BRAND} (e.g., META_ACCESS_TOKEN_FLO)
+ * Get the shared Meta CAPI access token.
+ * All brands use a single token (META_ACCESS_TOKEN).
  */
-export function getAccessToken(brand: string): string | null {
-  const key = `META_ACCESS_TOKEN_${brand.toUpperCase()}`;
-  return process.env[key] || null;
+export function getAccessToken(_brand?: string): string | null {
+  return process.env.META_ACCESS_TOKEN || null;
 }
 
 /**
@@ -50,8 +49,9 @@ export async function sendEvent(params: {
   accessToken: string;
   events: Record<string, unknown>[];
   testEventCode?: string;
+  brand?: string;
 }): Promise<MetaSendResult> {
-  const { pixelId, accessToken, events, testEventCode } = params;
+  const { pixelId, accessToken, events, testEventCode, brand } = params;
   const effectiveTestCode = testEventCode || process.env.META_TEST_EVENT_CODE || undefined;
 
   const url = `https://graph.facebook.com/v21.0/${pixelId}/events`;
@@ -76,7 +76,7 @@ export async function sendEvent(params: {
     const latencyMs = Date.now() - startMs;
 
     logger.info(
-      { pixelId, eventCount: events.length, status: response.status, latencyMs },
+      { brand, pixelId, eventCount: events.length, status: response.status, latencyMs },
       'Meta CAPI send success'
     );
 
@@ -97,7 +97,7 @@ export async function sendEvent(params: {
     const errorMessage = axiosError.message || 'Unknown error';
 
     logger.error(
-      { pixelId, httpStatus, error: errorMessage, latencyMs },
+      { brand, pixelId, httpStatus, error: errorMessage, latencyMs },
       'Meta CAPI send failed'
     );
 

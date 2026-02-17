@@ -132,6 +132,7 @@ export async function sendMetaWithQueue(
     pixelId: metadata.pixelId,
     accessToken,
     events: [capiEvent as unknown as Record<string, unknown>],
+    brand: metadata.brand,
   });
 
   // Record result (fire-and-forget)
@@ -182,6 +183,7 @@ export function startReplayWorker(): void {
             pixelId: event.pixel_id!,
             accessToken,
             events: capiEvents,
+            brand: event.brand,
           });
 
           await recordAttemptResult(event, event.attempt_count + 1, result);
