@@ -22,6 +22,9 @@ export function hashUserData(fields: {
   fn?: string | null;
   ln?: string | null;
   external_id?: string | null;
+  ct?: string | null;
+  st?: string | null;
+  zp?: string | null;
 }): Record<string, string> {
   const hashed: Record<string, string> = {};
   if (fields.em) hashed.em = sha256(fields.em);
@@ -29,6 +32,9 @@ export function hashUserData(fields: {
   if (fields.fn) hashed.fn = sha256(fields.fn);
   if (fields.ln) hashed.ln = sha256(fields.ln);
   if (fields.external_id) hashed.external_id = sha256(fields.external_id);
+  if (fields.ct) hashed.ct = sha256(fields.ct);
+  if (fields.st) hashed.st = sha256(fields.st);
+  if (fields.zp) hashed.zp = fields.zp; // ZIP is sent as-is per Meta spec (not hashed)
   return hashed;
 }
 

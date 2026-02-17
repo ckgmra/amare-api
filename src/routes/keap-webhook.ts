@@ -247,6 +247,14 @@ async function processPayment(
   const contactPhone = (contact as unknown as Record<string, unknown>).phone1 as string | undefined;
   const phone = shippingPhone || contactPhone || null;
 
+  // Extract address fields (city, state, zip) from Keap contact addresses
+  const contactAny = contact as unknown as Record<string, unknown>;
+  const addresses = contactAny.addresses as Array<Record<string, unknown>> | undefined;
+  const primaryAddr = addresses?.[0];
+  const city = (primaryAddr?.locality as string) || null;
+  const state = (primaryAddr?.region as string) || null;
+  const zip = (primaryAddr?.zip_code as string) || (primaryAddr?.postal_code as string) || null;
+
   reqLogger.info(
     { contactId, email, firstName, paymentId, amount },
     'Processing purchase CAPI event'
@@ -351,6 +359,9 @@ async function processPayment(
     ln: lastName,
     ph: phone,
     external_id: contactIdStr,
+    ct: city,
+    st: state,
+    zp: zip,
   });
 
   const userData: Record<string, unknown> = { ...hashedUserData };

@@ -276,15 +276,26 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
             // Use pixelId from frontend, or fall back to env var for the brand
             const resolvedPixelId = pixelId || metaCAPIClient.getPixelId(brand);
             if (resolvedPixelId) {
-              // Enrich with Keap contact data if available (last name, phone from existing contacts)
+              // Enrich with Keap contact data if available (last name, phone, address)
               let lastName: string | null = null;
               let phone: string | null = null;
+              let city: string | null = null;
+              let state: string | null = null;
+              let zip: string | null = null;
               if (contactId) {
                 try {
                   const keapContact = await keapClient.getContactById(contactId);
                   if (keapContact) {
                     lastName = keapContact.family_name || null;
-                    phone = (keapContact as unknown as Record<string, unknown>).phone1 as string || null;
+                    const kc = keapContact as unknown as Record<string, unknown>;
+                    phone = kc.phone1 as string || null;
+                    const addresses = kc.addresses as Array<Record<string, unknown>> | undefined;
+                    const addr = addresses?.[0];
+                    if (addr) {
+                      city = (addr.locality as string) || null;
+                      state = (addr.region as string) || null;
+                      zip = (addr.zip_code as string) || (addr.postal_code as string) || null;
+                    }
                   }
                 } catch {
                   // Non-critical — proceed without extra fields
@@ -297,6 +308,9 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
                 ln: lastName,
                 ph: phone,
                 external_id: keapContactIdStr,
+                ct: city,
+                st: state,
+                zp: zip,
               });
               const userData: Record<string, unknown> = { ...hashedUserData };
               if (fbp) userData.fbp = fbp;

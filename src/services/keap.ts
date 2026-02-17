@@ -628,7 +628,7 @@ class KeapClient {
     try {
       const response = await this.axiosInstance.get(`/contacts/${contactId}`, {
         params: {
-          optional_properties: 'custom_fields',
+          optional_properties: 'custom_fields,phone_numbers,addresses',
         },
       });
       return response.data;
