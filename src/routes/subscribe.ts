@@ -317,6 +317,7 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
                 source: 'subscribe',
                 brand: brand.toLowerCase(),
                 eventName: 'Subscribe',
+                email,
                 emailHash: hashedUserData.em || null,
                 keapContactId: keapContactIdStr,
                 eventId: eventId || null,

@@ -216,9 +216,12 @@ async function processPayment(
   reqLogger.info({ paymentId, transaction }, 'Fetched transaction from Keap');
 
   const contactId = transaction.contact_id as number | undefined;
-  const orderIds = transaction.order_ids as number[] | undefined;
   const amount = transaction.amount as number | undefined;
   const currency = (transaction.currency as string) || 'USD';
+
+  // order_ids is a STRING (e.g., "74775"), not an array
+  const rawOrderIds = transaction.order_ids;
+  const orderId: string | null = rawOrderIds ? String(rawOrderIds) : null;
 
   if (!contactId) {
     reqLogger.warn({ paymentId }, 'No contact_id in transaction');
@@ -235,7 +238,14 @@ async function processPayment(
   const email = contact.email_addresses?.[0]?.email || null;
   const firstName = contact.given_name || null;
   const lastName = contact.family_name || null;
-  const phone = (contact as unknown as Record<string, unknown>).phone1 as string | undefined;
+
+  // Extract phone — try transaction's shipping info first, then contact
+  const txnOrders = transaction.orders as Array<Record<string, unknown>> | undefined;
+  const shippingPhone = txnOrders?.[0]?.shipping_information
+    ? (txnOrders[0].shipping_information as Record<string, unknown>).phone as string | undefined
+    : undefined;
+  const contactPhone = (contact as unknown as Record<string, unknown>).phone1 as string | undefined;
+  const phone = shippingPhone || contactPhone || null;
 
   reqLogger.info(
     { contactId, email, firstName, paymentId, amount },
@@ -282,6 +292,17 @@ async function processPayment(
     if (brand) brand = brand.toLowerCase();
   }
 
+  // Fallback: detect brand from transaction's gateway_account_name (e.g., "HRYW-Auth.net")
+  if (!brand) {
+    const gatewayName = (transaction.gateway_account_name as string) || '';
+    const brandPrefixes = ['hryw', 'chkh', 'gkh', 'flo'];
+    const matched = brandPrefixes.find(b => gatewayName.toLowerCase().startsWith(b));
+    if (matched) {
+      brand = matched;
+      reqLogger.info({ gatewayName, brand }, 'Brand detected from gateway_account_name');
+    }
+  }
+
   // Fallback: detect brand from contact's Keap tags (e.g., HRYW-WebSub, FLO-Customer)
   if (!brand && contactId) {
     brand = await keapClient.detectBrandFromTags(contactId);
@@ -302,13 +323,12 @@ async function processPayment(
     return contactId;
   }
 
-  // Fetch order details for line items if we have order IDs
+  // Fetch order details for line items if we have an order ID
   let lineItems: Array<{ id: string; quantity: number; item_price: number }> = [];
-  const orderId = orderIds?.[0] ? String(orderIds[0]) : null;
 
-  if (orderIds && orderIds.length > 0) {
+  if (orderId) {
     try {
-      const order = await keapClient.getOrder(orderIds[0]);
+      const order = await keapClient.getOrder(Number(orderId));
       if (order) {
         const items = order.order_items as Array<Record<string, unknown>> | undefined;
         if (Array.isArray(items)) {
@@ -320,7 +340,7 @@ async function processPayment(
         }
       }
     } catch (err) {
-      reqLogger.warn({ err, orderId: orderIds[0] }, 'Failed to fetch order details');
+      reqLogger.warn({ err, orderId }, 'Failed to fetch order details');
     }
   }
 
@@ -329,16 +349,30 @@ async function processPayment(
     em: email,
     fn: firstName,
     ln: lastName,
-    ph: phone || null,
+    ph: phone,
     external_id: contactIdStr,
   });
 
   const userData: Record<string, unknown> = { ...hashedUserData };
-  // Enrich with tracking context if available
+  // Enrich with tracking context if available (fbp, fbc, IP, UA)
   if (trackingCtx?.fbp) userData.fbp = trackingCtx.fbp;
   if (trackingCtx?.fbc) userData.fbc = trackingCtx.fbc;
   if (trackingCtx?.ip_address) userData.client_ip_address = trackingCtx.ip_address;
   if (trackingCtx?.user_agent) userData.client_user_agent = trackingCtx.user_agent;
+
+  // Log what enrichment data we have for match quality debugging
+  reqLogger.info(
+    {
+      contactId,
+      hasEmail: !!email,
+      hasPhone: !!phone,
+      hasFbp: !!trackingCtx?.fbp,
+      hasFbc: !!trackingCtx?.fbc,
+      hasIp: !!trackingCtx?.ip_address,
+      hasUa: !!trackingCtx?.user_agent,
+    },
+    'Purchase CAPI match quality fields'
+  );
 
   const customData: Record<string, unknown> = {};
   if (amount != null) customData.value = amount;
@@ -359,6 +393,7 @@ async function processPayment(
     source: 'purchase',
     brand,
     eventName: 'Purchase',
+    email,
     emailHash: hashedUserData.em || null,
     keapContactId: contactIdStr,
     orderId,

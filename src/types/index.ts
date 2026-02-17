@@ -165,6 +165,7 @@ export interface MetaQueueRecord {
   source: string;
   brand: string;
   event_name: string;
+  email: string | null;
   email_hash: string | null;
   keap_contact_id: string | null;
   order_id: string | null;
@@ -188,6 +189,7 @@ export interface MetaQueueMetadata {
   source: 'subscribe' | 'purchase';
   brand: string;
   eventName: string;
+  email: string | null;
   emailHash: string | null;
   keapContactId?: string | null;
   orderId?: string | null;
