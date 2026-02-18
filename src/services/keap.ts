@@ -603,6 +603,27 @@ class KeapClient {
   }
 
   /**
+   * List ALL recent transactions (across all contacts) since a given date.
+   * Used for deferred id=0 payments where we don't know the contact.
+   */
+  async getRecentTransactions(sinceDate: string, limit: number = 50): Promise<Array<Record<string, unknown>>> {
+    try {
+      const response = await this.axiosInstance.get('/transactions', {
+        params: {
+          since: sinceDate,
+          limit,
+          order: 'date',
+          order_direction: 'descending',
+        },
+      });
+      return response.data.transactions || [];
+    } catch (error) {
+      logger.error({ error }, 'Failed to get recent transactions');
+      return [];
+    }
+  }
+
+  /**
    * Create a REST hook subscription
    */
   async createHook(eventKey: string, hookUrl: string): Promise<unknown> {

@@ -342,31 +342,29 @@ class BigQueryClient {
   }
 
   /**
-   * Look up the keap_contact_id from the most recent Purchase event in the queue.
-   * Used to find the contactId for deferred upsell payments (id=0) when the upsell
-   * webhook arrives as a standalone event with no immediate payments.
-   * Only looks at events from the last 5 minutes.
+   * Get the set of Keap transaction IDs we've already processed (sent to Meta CAPI).
+   * Purchase events store event_id as "purchase_txn_{transactionId}".
+   * Returns a Set of transaction ID strings (just the numeric part).
    */
-  async lookupRecentPurchaseContactId(): Promise<number | null> {
+  async getRecentlyProcessedTransactionIds(minutesBack: number = 30): Promise<Set<string>> {
     try {
       const query = `
-        SELECT keap_contact_id
+        SELECT DISTINCT event_id
         FROM \`${this.projectId}.${this.dataset}.${this.metaCapiQueueTable}\`
         WHERE source = 'purchase'
-          AND keap_contact_id IS NOT NULL
-          AND status = 'PENDING'
-          AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
-        ORDER BY created_at DESC
-        LIMIT 1
+          AND event_id IS NOT NULL
+          AND event_id LIKE 'purchase_txn_%'
+          AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${minutesBack} MINUTE)
       `;
       const [rows] = await this.client.query({ query });
-      if (rows.length > 0 && rows[0].keap_contact_id) {
-        return parseInt(rows[0].keap_contact_id, 10);
-      }
-      return null;
+      return new Set(rows.map((r: Record<string, unknown>) => {
+        const eventId = String(r.event_id);
+        // Extract transaction ID from "purchase_txn_845325" → "845325"
+        return eventId.replace('purchase_txn_', '');
+      }));
     } catch (error) {
-      logger.error({ error }, 'Failed to lookup recent purchase contactId');
-      return null;
+      logger.error({ error }, 'Failed to get recently processed transaction IDs');
+      return new Set();
     }
   }
 

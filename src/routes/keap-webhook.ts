@@ -84,42 +84,23 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
           }
         }
 
-        // Track processed transaction IDs for idempotency + deferred retry
-        const processedTxnIds = new Set<number>();
-        let knownContactId: number | null = null;
-
+        // Process immediate (real-ID) payments
         for (const paymentId of immediate) {
           try {
-            const contactId = await processPayment(paymentId, reqLogger);
-            processedTxnIds.add(paymentId);
-            if (contactId) knownContactId = contactId;
+            await processPayment(paymentId, reqLogger);
           } catch (err) {
             reqLogger.error({ err, paymentId }, 'Error processing payment');
           }
         }
 
-        // Handle deferred (id=0) payments — retry in background to find the real transaction
+        // Handle deferred (id=0) payments — reconcile by querying ALL recent
+        // Keap transactions and diffing against what we've already sent to Meta.
+        // No contactId needed — we catch any unprocessed transaction.
         if (deferredCount > 0) {
-          // If we don't have a contactId from immediate payments, look up the most
-          // recent purchase from our queue to find one (upsell follows a main purchase)
-          if (!knownContactId) {
-            knownContactId = await bigQueryClient.lookupRecentPurchaseContactId();
-          }
-
-          if (knownContactId) {
-            reqLogger.info(
-              { deferredCount, knownContactId, processedTxnIds: [...processedTxnIds] },
-              'Deferring id=0 payments for background retry'
-            );
-            retryDeferredPayments(knownContactId, deferredCount, processedTxnIds, reqLogger).catch(err => {
-              reqLogger.error({ err }, 'Deferred payment retry failed');
-            });
-          } else {
-            reqLogger.warn(
-              { deferredCount },
-              'Cannot retry deferred payments — no contactId available'
-            );
-          }
+          reqLogger.info({ deferredCount }, 'Deferring id=0 payments for background reconciliation');
+          reconcileDeferredPayments(deferredCount, reqLogger).catch(err => {
+            reqLogger.error({ err }, 'Deferred payment reconciliation failed');
+          });
         }
 
         return ack();
@@ -136,61 +117,78 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Retry deferred payments (id=0) with backoff.
+ * Reconcile deferred (id=0) payments by querying ALL recent Keap transactions
+ * and diffing against what we've already sent to Meta CAPI.
+ *
  * Keap fires invoice.payment.add for upsells before the transaction ID is assigned
- * and does NOT fire again with the real ID. We retry 3 times: wait 10s, 20s, 30s,
- * querying the contact's recent transactions to find new ones.
+ * and does NOT fire again with the real ID. Instead of trying to correlate by
+ * contactId (which we don't have from id=0), we query all recent transactions
+ * from Keap and process any we haven't already handled.
+ *
+ * Retries 3 times: wait 15s, 30s, 60s.
  */
-async function retryDeferredPayments(
-  contactId: number,
+async function reconcileDeferredPayments(
   expectedCount: number,
-  alreadyProcessed: Set<number>,
   reqLogger: typeof logger
 ): Promise<void> {
-  const delays = [10000, 20000, 30000]; // 10s, 20s, 30s
-  const newlyProcessed = new Set<number>();
+  const delays = [15000, 30000, 60000]; // 15s, 30s, 60s
+  const reconciled = new Set<number>();
 
   for (let i = 0; i < delays.length; i++) {
-    if (newlyProcessed.size >= expectedCount) break;
+    if (reconciled.size >= expectedCount) break;
 
     reqLogger.info(
-      { attempt: i + 1, delayMs: delays[i], contactId, remaining: expectedCount - newlyProcessed.size },
-      'Waiting to retry deferred payments'
+      { attempt: i + 1, delayMs: delays[i], remaining: expectedCount - reconciled.size },
+      'Waiting to reconcile deferred payments'
     );
     await sleep(delays[i]);
 
     try {
-      const recentTxns = await keapClient.getRecentTransactionsForContact(contactId, 10);
+      // Query all Keap transactions from the last 15 minutes
+      const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+      const recentTxns = await keapClient.getRecentTransactions(since, 50);
+
+      // Get transaction IDs we've already sent to Meta
+      const alreadyProcessed = await bigQueryClient.getRecentlyProcessedTransactionIds(30);
+
+      reqLogger.info(
+        { attempt: i + 1, keapTxnCount: recentTxns.length, alreadyProcessedCount: alreadyProcessed.size },
+        'Reconciliation: fetched recent transactions'
+      );
 
       for (const txn of recentTxns) {
         const txnId = txn.id as number;
-        if (!txnId || alreadyProcessed.has(txnId) || newlyProcessed.has(txnId)) continue;
+        if (!txnId || txnId <= 0) continue;
+
+        // Skip if we've already processed this transaction (in queue or this reconciliation run)
+        const txnIdStr = String(txnId);
+        if (alreadyProcessed.has(txnIdStr) || reconciled.has(txnId)) continue;
 
         try {
           await processPayment(txnId, reqLogger);
-          newlyProcessed.add(txnId);
+          reconciled.add(txnId);
           reqLogger.info(
-            { txnId, contactId, attempt: i + 1 },
-            'Deferred payment (upsell) processed successfully'
+            { txnId, attempt: i + 1 },
+            'Deferred payment (upsell) reconciled successfully'
           );
         } catch (err) {
-          reqLogger.warn({ err, txnId, attempt: i + 1 }, 'Deferred payment retry failed');
+          reqLogger.warn({ err, txnId, attempt: i + 1 }, 'Deferred payment reconciliation failed for txn');
         }
       }
     } catch (err) {
-      reqLogger.warn({ err, attempt: i + 1 }, 'Error querying recent transactions for deferred retry');
+      reqLogger.warn({ err, attempt: i + 1 }, 'Error during deferred payment reconciliation');
     }
   }
 
-  if (newlyProcessed.size < expectedCount) {
-    reqLogger.warn(
-      { contactId, expected: expectedCount, processed: newlyProcessed.size },
-      'Some deferred payments could not be resolved after all retries'
+  if (reconciled.size > 0) {
+    reqLogger.info(
+      { expected: expectedCount, reconciled: reconciled.size, txnIds: [...reconciled] },
+      'Deferred payment reconciliation complete'
     );
   } else {
-    reqLogger.info(
-      { contactId, processed: newlyProcessed.size },
-      'All deferred payments resolved'
+    reqLogger.warn(
+      { expected: expectedCount },
+      'Deferred payment reconciliation found no new transactions after all retries'
     );
   }
 }
@@ -390,9 +388,13 @@ async function processPayment(
   if (orderId) customData.order_id = orderId;
   if (lineItems.length > 0) customData.contents = lineItems;
 
+  // Use transaction ID as event_id for Meta dedup + reconciliation tracking
+  const eventId = `purchase_txn_${paymentId}`;
+
   const capiEvent: MetaCAPIEvent = {
     event_name: 'Purchase',
     event_time: Math.floor(Date.now() / 1000),
+    event_id: eventId,
     action_source: 'website',
     event_source_url: trackingCtx?.source_url || undefined,
     user_data: userData,
@@ -407,6 +409,7 @@ async function processPayment(
     emailHash: hashedUserData.em || null,
     keapContactId: contactIdStr,
     orderId,
+    eventId,
     pixelId,
   };
 
