@@ -12,6 +12,38 @@ import { logger } from '../utils/logger.js';
 const API_KEY = process.env.SUBSCRIBE_API_KEY;
 
 /**
+ * Server-side bot detection for first names.
+ * Returns a reason string if the name looks suspicious, null if OK.
+ */
+function detectBotName(firstName: string): string | null {
+  if (!firstName || firstName.length === 0) return null;
+
+  // All lowercase and > 1 character with no capital first letter
+  // (legitimate users almost always capitalize or autocomplete does)
+  // Skip single-char names
+  if (firstName.length > 1 && firstName === firstName.toLowerCase() && /^[a-z]+$/.test(firstName)) {
+    return 'all_lowercase';
+  }
+
+  // Long name with no spaces (> 15 chars, only letters)
+  if (firstName.length > 15 && /^[a-zA-Z]+$/.test(firstName)) {
+    return 'suspiciously_long';
+  }
+
+  // Starts with 3+ consonants in a row
+  if (/^[bcdfghjklmnpqrstvwxyz]{3,}/i.test(firstName)) {
+    return 'consonant_cluster';
+  }
+
+  // All same case and > 8 chars
+  if (firstName.length > 8 && (firstName === firstName.toLowerCase() || firstName === firstName.toUpperCase())) {
+    return 'uniform_case_long';
+  }
+
+  return null;
+}
+
+/**
  * Subscribe endpoint request body
  *
  * Required fields:
@@ -145,6 +177,14 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
             success: false,
             error: 'Missing required fields: email, firstName, brand, tag',
           } satisfies SubscribeResponse);
+        }
+
+        // ── Server-side bot detection ──
+        const botReason = detectBotName(firstName);
+        if (botReason) {
+          reqLogger.warn({ firstName, email, botReason }, 'Bot submission detected — rejecting');
+          // Return success to not tip off bots, but don't process
+          return reply.send({ success: true } satisfies SubscribeResponse);
         }
 
         // Validate brand

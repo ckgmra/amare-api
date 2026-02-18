@@ -342,6 +342,35 @@ class BigQueryClient {
   }
 
   /**
+   * Look up the keap_contact_id from the most recent Purchase event in the queue.
+   * Used to find the contactId for deferred upsell payments (id=0) when the upsell
+   * webhook arrives as a standalone event with no immediate payments.
+   * Only looks at events from the last 5 minutes.
+   */
+  async lookupRecentPurchaseContactId(): Promise<number | null> {
+    try {
+      const query = `
+        SELECT keap_contact_id
+        FROM \`${this.projectId}.${this.dataset}.${this.metaCapiQueueTable}\`
+        WHERE source = 'purchase'
+          AND keap_contact_id IS NOT NULL
+          AND status = 'PENDING'
+          AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      const [rows] = await this.client.query({ query });
+      if (rows.length > 0 && rows[0].keap_contact_id) {
+        return parseInt(rows[0].keap_contact_id, 10);
+      }
+      return null;
+    } catch (error) {
+      logger.error({ error }, 'Failed to lookup recent purchase contactId');
+      return null;
+    }
+  }
+
+  /**
    * Insert a meta CAPI queue row (append-only).
    * Used for both initial PENDING and subsequent status rows.
    */

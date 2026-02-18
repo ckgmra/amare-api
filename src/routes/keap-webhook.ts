@@ -11,15 +11,9 @@ import type { MetaCAPIEvent, MetaQueueMetadata, TrackingContextRecord } from '..
  * - Verification: POST with X-Hook-Secret header (no body or empty body)
  * - Event: POST with { event_key: string, object_keys: Array<{ id, apiUrl, timestamp }> }
  */
-interface KeapObjectKey {
-  id: number;
-  apiUrl?: string;
-  timestamp?: string;
-}
-
 interface KeapHookEventBody {
   event_key?: string;
-  object_keys?: KeapObjectKey[];
+  object_keys?: Array<{ id: number; [key: string]: unknown }>;
   [key: string]: unknown;
 }
 
@@ -76,21 +70,21 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
         }
 
         // Process each payment — object_keys are objects with { id, apiUrl, timestamp }
-        // Payments with id=0 are deferred (Keap fires before transaction is ready)
+        // Payments with id=0 are deferred (Keap fires before transaction is ready, common with upsells).
+        // Keap does NOT fire again with the real ID, so we must retry to find the transaction.
         const immediate: number[] = [];
-        const deferred: KeapObjectKey[] = [];
+        let deferredCount = 0;
 
         for (const objectKey of object_keys) {
           const paymentId = typeof objectKey === 'object' ? objectKey.id : objectKey;
           if (paymentId && paymentId > 0) {
             immediate.push(paymentId);
           } else {
-            deferred.push(typeof objectKey === 'object' ? objectKey : { id: 0 });
+            deferredCount++;
           }
         }
 
-        // Process ready payments immediately, track which transaction IDs we handled
-        // and capture the contactId for deferred payment lookups
+        // Track processed transaction IDs for idempotency + deferred retry
         const processedTxnIds = new Set<number>();
         let knownContactId: number | null = null;
 
@@ -104,21 +98,28 @@ export async function keapWebhookRoutes(fastify: FastifyInstance) {
           }
         }
 
-        // Defer id=0 payments — retry in background after delays
-        // Uses the contactId from the first processed payment to find new transactions
-        if (deferred.length > 0 && knownContactId) {
-          reqLogger.info(
-            { count: deferred.length, knownContactId, processedTxnIds: [...processedTxnIds] },
-            'Deferring id=0 payments for background retry'
-          );
-          retryDeferredPayments(knownContactId, deferred.length, processedTxnIds, reqLogger).catch(err => {
-            reqLogger.error({ err }, 'Deferred payment retry failed');
-          });
-        } else if (deferred.length > 0) {
-          reqLogger.warn(
-            { count: deferred.length },
-            'Cannot retry deferred payments — no contactId from immediate payments'
-          );
+        // Handle deferred (id=0) payments — retry in background to find the real transaction
+        if (deferredCount > 0) {
+          // If we don't have a contactId from immediate payments, look up the most
+          // recent purchase from our queue to find one (upsell follows a main purchase)
+          if (!knownContactId) {
+            knownContactId = await bigQueryClient.lookupRecentPurchaseContactId();
+          }
+
+          if (knownContactId) {
+            reqLogger.info(
+              { deferredCount, knownContactId, processedTxnIds: [...processedTxnIds] },
+              'Deferring id=0 payments for background retry'
+            );
+            retryDeferredPayments(knownContactId, deferredCount, processedTxnIds, reqLogger).catch(err => {
+              reqLogger.error({ err }, 'Deferred payment retry failed');
+            });
+          } else {
+            reqLogger.warn(
+              { deferredCount },
+              'Cannot retry deferred payments — no contactId available'
+            );
+          }
         }
 
         return ack();
@@ -136,16 +137,14 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Retry deferred payments (id=0) with backoff.
- * Keap sometimes fires invoice.payment.add before the transaction ID is assigned
- * (common with upsells). We retry 3 times: wait 10s, 20s, 30s.
- *
- * Strategy: Query the contact's recent transactions from Keap and process
- * any we haven't already handled.
+ * Keap fires invoice.payment.add for upsells before the transaction ID is assigned
+ * and does NOT fire again with the real ID. We retry 3 times: wait 10s, 20s, 30s,
+ * querying the contact's recent transactions to find new ones.
  */
 async function retryDeferredPayments(
   contactId: number,
   expectedCount: number,
-  processedTxnIds: Set<number>,
+  alreadyProcessed: Set<number>,
   reqLogger: typeof logger
 ): Promise<void> {
   const delays = [10000, 20000, 30000]; // 10s, 20s, 30s
@@ -165,7 +164,7 @@ async function retryDeferredPayments(
 
       for (const txn of recentTxns) {
         const txnId = txn.id as number;
-        if (!txnId || processedTxnIds.has(txnId) || newlyProcessed.has(txnId)) continue;
+        if (!txnId || alreadyProcessed.has(txnId) || newlyProcessed.has(txnId)) continue;
 
         try {
           await processPayment(txnId, reqLogger);
