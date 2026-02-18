@@ -34,7 +34,7 @@ export function hashUserData(fields: {
   if (fields.external_id) hashed.external_id = sha256(fields.external_id);
   if (fields.ct) hashed.ct = sha256(fields.ct);
   if (fields.st) hashed.st = sha256(fields.st);
-  if (fields.zp) hashed.zp = fields.zp; // ZIP is sent as-is per Meta spec (not hashed)
+  if (fields.zp) hashed.zp = sha256(fields.zp);
   return hashed;
 }
 
