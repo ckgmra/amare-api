@@ -103,7 +103,9 @@ export async function sendMetaWithQueue(
     capi_payload_json: capiPayloadJson,
     status: 'PENDING',
     attempt_count: 0,
-    next_attempt_at: now,
+    // Set next_attempt_at 2 minutes in the future so the replay worker
+    // doesn't pick this up while the initial send is still in-flight.
+    next_attempt_at: new Date(Date.now() + 2 * 60000).toISOString(),
     last_http_status: null,
     last_error_message: null,
     last_response_json: null,
