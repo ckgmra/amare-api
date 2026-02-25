@@ -4,10 +4,11 @@
 
 All four Amare brand sites (HRYW, CHKH, GKH, FLO) send **server-side events** to Meta (Facebook) via the Conversions API alongside the standard browser pixel. This gives Meta better data for ad optimization, even when ad blockers prevent the browser pixel from firing.
 
-**Two event types are tracked:**
+**Three event types are tracked:**
 
 - **Subscribe** — Fires when someone signs up via a newsletter form. Sent from both the browser pixel AND the server (deduplicated by a shared event ID).
-- **Purchase** — Fires when a payment is recorded in Keap. Server-only (no browser pixel needed).
+- **Purchase** — Fires when a payment is recorded in Keap and it is either a one-time product or the **first billing** of a subscription. Server-only.
+- **RecurringPayment** — Fires when a Keap payment belongs to a subscription plan that already has prior paid invoices for that contact. Server-only. This is a custom Meta event (not a standard event).
 
 **Key infrastructure:**
 
@@ -55,8 +56,8 @@ All four Amare brand sites (HRYW, CHKH, GKH, FLO) send **server-side events** to
                                               |   events using the shared event_id
 
 
-                         PURCHASE FLOW
-                         =============
+                         PURCHASE / RECURRING FLOW
+                         =========================
 
   Keap                       Cloud Run                                     Meta
   ----                       ---------                                     ----
@@ -67,12 +68,23 @@ All four Amare brand sites (HRYW, CHKH, GKH, FLO) send **server-side events** to
                                 |
                                 |-- GET /transactions/{id} from Keap
                                 |-- GET /contacts/{id} from Keap
+                                |-- GET /orders/{orderId} from Keap
+                                |     - extract line items
+                                |     - check for subscription_plan field
+                                |-- If subscription_plan present:
+                                |     GET /orders?contact_id={id} from Keap
+                                |     count prior paid orders with same plan ID
+                                |     → RecurringPayment if prior orders exist
+                                |     → Purchase if this is the first billing
+                                |-- Else (no subscription_plan):
+                                |     → Purchase (one-time product)
                                 |-- Lookup tracking_context (BigQuery)
                                 |     (for fbp, fbc, IP, user agent enrichment)
                                 |-- If no tracking context:
                                 |     lookup brand from subscriber_queue
                                 |     get pixel_id from META_PIXEL_ID_{BRAND} env
                                 |-- POST to Meta CAPI  ------------------>  Meta CAPI (server)
+                                      (Purchase or RecurringPayment)
                                       (via durable queue)
 ```
 
@@ -117,7 +129,8 @@ After processing the Keap contact (create/update, apply tags, opt-in), the subsc
 2. **Sends Subscribe CAPI event** with:
    - Hashed email, first name, last name (from Keap), phone (from Keap), external_id (keap contact_id)
    - `_fbp` and `_fbc` cookie values (from browser, passed through)
-   - Client IP address and browser user agent
+   - Client IP address — sourced from `customFields['DP_IP_ADDRESS']` (the real browser IP fetched client-side via `api.ipify.org`), falling back to `X-Forwarded-For`. The ipify value is preferred because `X-Forwarded-For` on the Cloud Run request reflects the Next.js server IP, not the user's browser IP.
+   - Browser user agent — captured by the Next.js API route from the incoming `User-Agent` header and forwarded in the request body
    - Source URL, event ID (for deduplication with browser pixel)
 3. Falls back to `META_PIXEL_ID_{BRAND}` env var if the frontend didn't provide a pixel ID (e.g., ad blocker scenario)
 
@@ -136,10 +149,17 @@ Receives Keap REST Hook events when payments are recorded. Handles two types of 
 For each payment:
 1. Fetches transaction details from Keap API (`GET /transactions/{id}`)
 2. Fetches contact details from Keap API (`GET /contacts/{contactId}`)
-3. Looks up `tracking_context` in BigQuery for enrichment (fbp, fbc, IP, user agent)
-4. If no tracking context: determines brand from `subscriber_queue` table, gets pixel ID from env var
-5. Sends Purchase CAPI event with hashed PII + any available tracking data
-6. Always returns `200 { received: true }` to prevent Keap from marking the hook inactive
+3. Fetches order details from Keap API (`GET /orders/{orderId}`) — extracts line items and checks for `subscription_plan` field
+4. **Classifies the event:**
+   - If `order.subscription_plan` is absent → **Purchase** (one-time product)
+   - If `order.subscription_plan` is present → fetches all paid orders for the contact (`GET /orders?contact_id={id}`), counts prior orders with the same plan ID
+     - Prior orders exist → **RecurringPayment**
+     - No prior orders → **Purchase** (first subscription billing)
+   - Classification failure defaults to **Purchase**
+5. Looks up `tracking_context` in BigQuery for enrichment (fbp, fbc, IP, user agent)
+6. If no tracking context: determines brand from `subscriber_queue` table, gets pixel ID from env var
+7. Sends Purchase or RecurringPayment CAPI event with hashed PII + any available tracking data
+8. Always returns `200 { received: true }` to prevent Keap from marking the hook inactive
 
 ### 4. Meta CAPI Client
 
@@ -223,7 +243,7 @@ Durable queue for all CAPI sends. Append-only status tracking with retry support
 | queue_id | STRING | UUID grouping all status rows for one event |
 | source | STRING | `subscribe` or `purchase` |
 | brand | STRING | Brand code |
-| event_name | STRING | `Subscribe` or `Purchase` |
+| event_name | STRING | `Subscribe`, `Purchase`, or `RecurringPayment` |
 | email_hash | STRING | SHA-256 hashed email |
 | keap_contact_id | STRING | Keap contact ID |
 | order_id | STRING | Order ID (purchases only) |
@@ -335,10 +355,18 @@ If a token expires or is revoked, the durable queue will keep retrying events (u
 
 ### Test Purchase CAPI
 
-1. Create a test invoice + payment in Keap for a known contact
-2. Check Cloud Run logs for "Purchase CAPI event queued"
-3. Check `meta_capi_queue` in BigQuery for SENT row
-4. Check Meta Events Manager for Purchase event
+1. Create a test invoice + payment in Keap for a known contact (one-time product, no subscription plan)
+2. Check Cloud Run logs for `'CAPI event queued'` with `eventName: 'Purchase'`
+3. Check `meta_capi_queue` in BigQuery for a SENT row with `event_name = 'Purchase'`
+4. Check Meta Events Manager for a Purchase event
+
+### Test RecurringPayment CAPI
+
+1. Use a Keap contact that has an existing paid subscription invoice
+2. Record a second payment for the same subscription plan
+3. Check Cloud Run logs for `'Subscription payment classification'` — confirm `priorCount > 0` and `eventName: 'RecurringPayment'`
+4. Check `meta_capi_queue` in BigQuery for a SENT row with `event_name = 'RecurringPayment'`
+5. Check Meta Events Manager — RecurringPayment will appear under **Custom Events** (not Standard Events)
 
 ### Observability Queries
 

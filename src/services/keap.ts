@@ -695,6 +695,29 @@ class KeapClient {
   }
 
   /**
+   * Get all orders for a contact from Keap.
+   * Used to count prior subscription invoices to distinguish initial Purchase
+   * from RecurringPayment events sent to Meta CAPI.
+   *
+   * @param contactId - Keap contact ID
+   * @param status - Optional order status filter (e.g. 'PAID')
+   */
+  async getOrdersByContact(
+    contactId: number,
+    status?: string
+  ): Promise<Array<Record<string, unknown>>> {
+    try {
+      const params: Record<string, unknown> = { contact_id: contactId, limit: 200 };
+      if (status) params.order_status = status;
+      const response = await this.axiosInstance.get('/orders', { params });
+      return response.data.orders || [];
+    } catch (error) {
+      logger.error({ error, contactId }, 'Failed to get orders for contact');
+      return [];
+    }
+  }
+
+  /**
    * Get a transaction (payment) by ID
    * Returns payment details including contact_id, order_ids, amount
    */

@@ -196,8 +196,8 @@ async function reconcileDeferredPayments(
 /**
  * Process a single payment from Keap webhook.
  * Fetches payment details from Keap API, looks up tracking context
- * for enrichment, and always sends a Purchase CAPI event as long as
- * we can determine the brand/pixel.
+ * for enrichment, and sends a Purchase or RecurringPayment CAPI event
+ * depending on whether prior subscription invoices exist for this contact.
  */
 async function processPayment(
   paymentId: number,
@@ -328,8 +328,9 @@ async function processPayment(
     return contactId;
   }
 
-  // Fetch order details for line items if we have an order ID
+  // Fetch order details for line items + subscription detection
   let lineItems: Array<{ id: string; quantity: number; item_price: number }> = [];
+  let subscriptionPlanId: number | null = null;
 
   if (orderId) {
     try {
@@ -343,13 +344,40 @@ async function processPayment(
             item_price: (item.price as number) || 0,
           }));
         }
+        // Check if this order is tied to a subscription plan
+        const subPlan = order.subscription_plan as Record<string, unknown> | undefined;
+        if (subPlan?.id) {
+          subscriptionPlanId = subPlan.id as number;
+        }
       }
     } catch (err) {
       reqLogger.warn({ err, orderId }, 'Failed to fetch order details');
     }
   }
 
-  // Build Purchase CAPI event
+  // Determine event name: RecurringPayment if this is a subscription rebill with prior invoices,
+  // Purchase otherwise (initial payment or one-time product).
+  let eventName = 'Purchase';
+  if (subscriptionPlanId && contactId) {
+    try {
+      const contactOrders = await keapClient.getOrdersByContact(contactId, 'PAID');
+      const priorSubscriptionOrders = contactOrders.filter((o) => {
+        const sp = o.subscription_plan as Record<string, unknown> | undefined;
+        return sp?.id === subscriptionPlanId && String(o.id) !== orderId;
+      });
+      if (priorSubscriptionOrders.length > 0) {
+        eventName = 'RecurringPayment';
+      }
+      reqLogger.info(
+        { contactId, subscriptionPlanId, priorCount: priorSubscriptionOrders.length, eventName },
+        'Subscription payment classification'
+      );
+    } catch (err) {
+      reqLogger.warn({ err, contactId, subscriptionPlanId }, 'Failed to classify subscription payment — defaulting to Purchase');
+    }
+  }
+
+  // Build CAPI event
   const hashedUserData = metaCAPIClient.hashUserData({
     em: email,
     fn: firstName,
@@ -372,6 +400,7 @@ async function processPayment(
   reqLogger.info(
     {
       contactId,
+      eventName,
       hasEmail: !!email,
       hasPhone: !!phone,
       hasFbp: !!trackingCtx?.fbp,
@@ -379,7 +408,7 @@ async function processPayment(
       hasIp: !!trackingCtx?.ip_address,
       hasUa: !!trackingCtx?.user_agent,
     },
-    'Purchase CAPI match quality fields'
+    'CAPI event match quality fields'
   );
 
   const customData: Record<string, unknown> = {};
@@ -392,7 +421,7 @@ async function processPayment(
   const eventId = `purchase_txn_${paymentId}`;
 
   const capiEvent: MetaCAPIEvent = {
-    event_name: 'Purchase',
+    event_name: eventName,
     event_time: Math.floor(Date.now() / 1000),
     event_id: eventId,
     action_source: 'website',
@@ -404,7 +433,7 @@ async function processPayment(
   const queueMetadata: MetaQueueMetadata = {
     source: 'purchase',
     brand,
-    eventName: 'Purchase',
+    eventName,
     email,
     emailHash: hashedUserData.em || null,
     keapContactId: contactIdStr,
@@ -415,12 +444,12 @@ async function processPayment(
 
   // Send via durable queue (fire-and-forget from webhook perspective)
   sendMetaWithQueue(queueMetadata, capiEvent).catch(err => {
-    reqLogger.error({ err }, 'Failed to queue Purchase CAPI event');
+    reqLogger.error({ err, eventName }, 'Failed to queue CAPI event');
   });
 
   reqLogger.info(
-    { contactId, orderId, pixelId, brand, hasTrackingContext: !!trackingCtx },
-    'Purchase CAPI event queued'
+    { contactId, orderId, pixelId, brand, eventName, hasTrackingContext: !!trackingCtx },
+    'CAPI event queued'
   );
 
   return contactId;

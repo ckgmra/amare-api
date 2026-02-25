@@ -355,7 +355,11 @@ export async function subscribeRoutes(fastify: FastifyInstance) {
               const userData: Record<string, unknown> = { ...hashedUserData };
               if (fbp) userData.fbp = fbp;
               if (fbc) userData.fbc = fbc;
-              if (ipAddress) userData.client_ip_address = ipAddress;
+              // Prefer the real browser IP (fetched via ipify on the client and passed through
+              // customFields.DP_IP_ADDRESS), since ipAddress from X-Forwarded-For is the
+              // Next.js server IP, not the user's browser IP.
+              const realClientIP = (customFields as Record<string, string>)?.['DP_IP_ADDRESS'] || ipAddress;
+              if (realClientIP) userData.client_ip_address = realClientIP;
               if (browserUA || userAgent) userData.client_user_agent = browserUA || userAgent;
 
               const capiEvent: MetaCAPIEvent = {
