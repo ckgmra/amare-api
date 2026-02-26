@@ -341,6 +341,40 @@ async function processPayment(
       const order = await keapClient.getOrder(Number(orderId));
       if (order) {
         rawOrderJson = JSON.stringify(order);
+
+        // If the order was created on a prior date, this is an installment payment
+        // (multi-pay plan) on an order already reported to Meta. Skip CAPI entirely.
+        const orderCreationDate = order.creation_date as string | undefined;
+        if (orderCreationDate) {
+          const orderDay = new Date(orderCreationDate).toISOString().slice(0, 10);
+          const today = new Date().toISOString().slice(0, 10);
+          if (orderDay !== today) {
+            classificationNote = 'installment_skip';
+            reqLogger.info(
+              { paymentId, orderId, orderDay, today },
+              'Skipping CAPI — installment payment on old order'
+            );
+            bigQueryClient.insertWebhookLog({
+              created_at: new Date().toISOString(),
+              payment_id: paymentId,
+              contact_id: contactId,
+              brand,
+              event_name: null,
+              subscription_plan_id: null,
+              prior_order_count: null,
+              order_id: orderId,
+              amount: amount ?? null,
+              currency,
+              raw_transaction_json: JSON.stringify(transaction),
+              raw_order_json: rawOrderJson,
+              classification_note: classificationNote,
+            }).catch(err => {
+              reqLogger.error({ err, paymentId }, 'Failed to insert webhook log');
+            });
+            return contactId;
+          }
+        }
+
         const items = order.order_items as Array<Record<string, unknown>> | undefined;
         if (Array.isArray(items)) {
           lineItems = items.map((item) => ({
