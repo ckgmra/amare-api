@@ -18,7 +18,8 @@ All four Amare brand sites (HRYW, CHKH, GKH, FLO) send **server-side events** to
 | Cloud Run API (`amare-api`) | Server-side CAPI sends, Keap webhook handler |
 | BigQuery `tracking_context` | Stores browser tracking data per subscriber |
 | BigQuery `meta_capi_queue` | Durable queue for all CAPI sends with retry |
-| Keap REST Hook | Triggers Purchase events on invoice payment |
+| BigQuery `keap_webhook_log` | Audit log of every Keap payment processed (classification debugging) |
+| Keap REST Hook | Triggers Purchase/RecurringPayment events on invoice payment |
 | Google Secret Manager | Stores Meta access tokens per brand |
 
 ---
@@ -69,6 +70,9 @@ All four Amare brand sites (HRYW, CHKH, GKH, FLO) send **server-side events** to
                                 |-- GET /transactions/{id} from Keap
                                 |-- GET /contacts/{id} from Keap
                                 |-- GET /orders/{orderId} from Keap
+                                |     - check order.creation_date
+                                |     - if creation_date != today → SKIP (installment
+                                |       payment on old multi-pay order) → log + return
                                 |     - extract line items
                                 |     - check for subscription_plan field
                                 |-- If subscription_plan present:
@@ -83,6 +87,7 @@ All four Amare brand sites (HRYW, CHKH, GKH, FLO) send **server-side events** to
                                 |-- If no tracking context:
                                 |     lookup brand from subscriber_queue
                                 |     get pixel_id from META_PIXEL_ID_{BRAND} env
+                                |-- Write row to keap_webhook_log (BigQuery)
                                 |-- POST to Meta CAPI  ------------------>  Meta CAPI (server)
                                       (Purchase or RecurringPayment)
                                       (via durable queue)
@@ -149,17 +154,34 @@ Receives Keap REST Hook events when payments are recorded. Handles two types of 
 For each payment:
 1. Fetches transaction details from Keap API (`GET /transactions/{id}`)
 2. Fetches contact details from Keap API (`GET /contacts/{contactId}`)
-3. Fetches order details from Keap API (`GET /orders/{orderId}`) — extracts line items and checks for `subscription_plan` field
-4. **Classifies the event:**
+3. Fetches order details from Keap API (`GET /orders/{orderId}`)
+4. **Installment check (multi-pay skip):** If `order.creation_date` is not today, this is a scheduled collection on an old multi-pay order — the full purchase value was already reported to Meta on the original order date. Logs to `keap_webhook_log` with `classification_note = 'installment_skip'` and returns without sending to Meta.
+5. **Classifies the event** (today's orders only):
    - If `order.subscription_plan` is absent → **Purchase** (one-time product)
    - If `order.subscription_plan` is present → fetches all paid orders for the contact (`GET /orders?contact_id={id}`), counts prior orders with the same plan ID
      - Prior orders exist → **RecurringPayment**
      - No prior orders → **Purchase** (first subscription billing)
    - Classification failure defaults to **Purchase**
-5. Looks up `tracking_context` in BigQuery for enrichment (fbp, fbc, IP, user agent)
-6. If no tracking context: determines brand from `subscriber_queue` table, gets pixel ID from env var
-7. Sends Purchase or RecurringPayment CAPI event with hashed PII + any available tracking data
-8. Always returns `200 { received: true }` to prevent Keap from marking the hook inactive
+6. Looks up `tracking_context` in BigQuery for enrichment (fbp, fbc, IP, user agent)
+7. If no tracking context: determines brand from `subscriber_queue` table, gets pixel ID from env var
+8. Writes a row to `keap_webhook_log` with raw Keap API responses and classification result
+9. Sends Purchase or RecurringPayment CAPI event with hashed PII + any available tracking data
+10. Always returns `200 { received: true }` to prevent Keap from marking the hook inactive
+
+**Payment type decision tree:**
+
+```
+Has order_id?
+  No  → Purchase (no order to inspect)
+  Yes → Fetch order
+          order.creation_date != today?
+            Yes → SKIP (installment on old multi-pay order)
+            No  → order.subscription_plan present?
+                    No  → Purchase (one-time product)
+                    Yes → Prior paid orders for same plan?
+                            No  → Purchase (first subscription billing)
+                            Yes → RecurringPayment (subscription rebill)
+```
 
 ### 4. Meta CAPI Client
 
@@ -260,6 +282,44 @@ Durable queue for all CAPI sends. Append-only status tracking with retry support
 | last_error_message | STRING | Error message if failed |
 | last_response_json | STRING | Meta API response body |
 | last_latency_ms | INTEGER | Send latency in milliseconds |
+
+### keap_webhook_log
+
+Audit log written for every Keap payment webhook processed. Captures raw Keap API responses and classification results for debugging. One row per payment — written whether or not a CAPI event is sent.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| created_at | TIMESTAMP | When the webhook was processed |
+| payment_id | INTEGER | Keap transaction/payment ID |
+| contact_id | INTEGER | Keap contact ID |
+| brand | STRING | Detected brand (HRYW, CHKH, GKH, FLO) |
+| event_name | STRING | `Purchase`, `RecurringPayment`, or null (if skipped) |
+| subscription_plan_id | INTEGER | Subscription plan ID if present on order; null for one-time products |
+| prior_order_count | INTEGER | Count of prior paid orders for same subscription plan; null if not a subscription |
+| order_id | STRING | Keap order ID |
+| amount | FLOAT | Payment amount |
+| currency | STRING | Currency code |
+| raw_transaction_json | STRING | Full `/transactions/{id}` response from Keap |
+| raw_order_json | STRING | Full `/orders/{id}` response from Keap (shows `subscription_plan`, `creation_date`) |
+| classification_note | STRING | Reason code: `no_order_id`, `no_subscription_plan`, `installment_skip`, `classification_error` |
+
+**Partitioned by** `DATE(created_at)`, retained for 365 days.
+
+**Key query — check today's classification results:**
+```sql
+SELECT payment_id, contact_id, brand, event_name, subscription_plan_id,
+       prior_order_count, classification_note, order_id, amount
+FROM `watchful-force-477418-b9.keap_integration.keap_webhook_log`
+WHERE DATE(created_at) = CURRENT_DATE()
+ORDER BY created_at DESC;
+```
+
+**Inspect raw Keap data for a specific payment:**
+```sql
+SELECT raw_transaction_json, raw_order_json
+FROM `watchful-force-477418-b9.keap_integration.keap_webhook_log`
+WHERE payment_id = 12345;
+```
 
 ---
 
@@ -368,9 +428,23 @@ If a token expires or is revoked, the durable queue will keep retrying events (u
 4. Check `meta_capi_queue` in BigQuery for a SENT row with `event_name = 'RecurringPayment'`
 5. Check Meta Events Manager — RecurringPayment will appear under **Custom Events** (not Standard Events)
 
+### Test Installment Skip
+
+1. Record a payment in Keap against an order created on a prior date (any multi-pay plan)
+2. Check Cloud Run logs for `'Skipping CAPI — installment payment on old order'`
+3. Check `keap_webhook_log` — row should appear with `event_name = null` and `classification_note = 'installment_skip'`
+4. Confirm no new row in `meta_capi_queue` for that payment
+
 ### Observability Queries
 
 ```sql
+-- Today's webhook classification summary
+SELECT event_name, classification_note, COUNT(*) as count
+FROM `watchful-force-477418-b9.keap_integration.keap_webhook_log`
+WHERE DATE(created_at) = CURRENT_DATE()
+GROUP BY 1, 2
+ORDER BY 3 DESC;
+
 -- Recent CAPI queue activity
 SELECT queue_id, source, brand, event_name, status, attempt_count,
        last_error_message, updated_at
@@ -391,6 +465,11 @@ SELECT *
 FROM `watchful-force-477418-b9.keap_integration.tracking_context`
 WHERE email = 'user@example.com'
 ORDER BY created_at DESC;
+
+-- Inspect raw Keap data for a specific payment
+SELECT raw_transaction_json, raw_order_json, classification_note
+FROM `watchful-force-477418-b9.keap_integration.keap_webhook_log`
+WHERE payment_id = 12345;
 ```
 
 ---
