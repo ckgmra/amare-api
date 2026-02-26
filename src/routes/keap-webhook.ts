@@ -331,11 +331,16 @@ async function processPayment(
   // Fetch order details for line items + subscription detection
   let lineItems: Array<{ id: string; quantity: number; item_price: number }> = [];
   let subscriptionPlanId: number | null = null;
+  let rawOrderJson: string | null = null;
+  let classificationNote: string | null = null;
 
-  if (orderId) {
+  if (!orderId) {
+    classificationNote = 'no_order_id';
+  } else {
     try {
       const order = await keapClient.getOrder(Number(orderId));
       if (order) {
+        rawOrderJson = JSON.stringify(order);
         const items = order.order_items as Array<Record<string, unknown>> | undefined;
         if (Array.isArray(items)) {
           lineItems = items.map((item) => ({
@@ -348,6 +353,8 @@ async function processPayment(
         const subPlan = order.subscription_plan as Record<string, unknown> | undefined;
         if (subPlan?.id) {
           subscriptionPlanId = subPlan.id as number;
+        } else {
+          classificationNote = 'no_subscription_plan';
         }
       }
     } catch (err) {
@@ -358,6 +365,7 @@ async function processPayment(
   // Determine event name: RecurringPayment if this is a subscription rebill with prior invoices,
   // Purchase otherwise (initial payment or one-time product).
   let eventName = 'Purchase';
+  let priorOrderCount: number | null = null;
   if (subscriptionPlanId && contactId) {
     try {
       const contactOrders = await keapClient.getOrdersByContact(contactId, 'PAID');
@@ -365,17 +373,38 @@ async function processPayment(
         const sp = o.subscription_plan as Record<string, unknown> | undefined;
         return sp?.id === subscriptionPlanId && String(o.id) !== orderId;
       });
-      if (priorSubscriptionOrders.length > 0) {
+      priorOrderCount = priorSubscriptionOrders.length;
+      if (priorOrderCount > 0) {
         eventName = 'RecurringPayment';
       }
       reqLogger.info(
-        { contactId, subscriptionPlanId, priorCount: priorSubscriptionOrders.length, eventName },
+        { contactId, subscriptionPlanId, priorCount: priorOrderCount, eventName },
         'Subscription payment classification'
       );
     } catch (err) {
+      classificationNote = 'classification_error';
       reqLogger.warn({ err, contactId, subscriptionPlanId }, 'Failed to classify subscription payment — defaulting to Purchase');
     }
   }
+
+  // Log every processed payment for classification debugging
+  bigQueryClient.insertWebhookLog({
+    created_at: new Date().toISOString(),
+    payment_id: paymentId,
+    contact_id: contactId,
+    brand,
+    event_name: eventName,
+    subscription_plan_id: subscriptionPlanId,
+    prior_order_count: priorOrderCount,
+    order_id: orderId,
+    amount: amount ?? null,
+    currency,
+    raw_transaction_json: JSON.stringify(transaction),
+    raw_order_json: rawOrderJson,
+    classification_note: classificationNote,
+  }).catch(err => {
+    reqLogger.error({ err, paymentId }, 'Failed to insert webhook log');
+  });
 
   // Build CAPI event
   const hashedUserData = metaCAPIClient.hashUserData({

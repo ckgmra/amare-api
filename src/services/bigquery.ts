@@ -1,5 +1,5 @@
 import { BigQuery } from '@google-cloud/bigquery';
-import type { TagAction, ClickbankTransaction, SubscriberQueueEntry, TrackingContextRecord, MetaQueueRecord } from '../types/index.js';
+import type { TagAction, ClickbankTransaction, SubscriberQueueEntry, TrackingContextRecord, MetaQueueRecord, KeapWebhookLogRecord } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 class BigQueryClient {
@@ -446,6 +446,28 @@ class BigQueryClient {
     } catch (error) {
       logger.error({ error, email }, 'Failed to lookup brand by email');
       return null;
+    }
+  }
+
+  /**
+   * Insert a keap webhook log row for classification debugging.
+   * Fire-and-forget — caller should .catch() errors.
+   */
+  async insertWebhookLog(record: KeapWebhookLogRecord): Promise<void> {
+    try {
+      const tableRef = this.client.dataset(this.dataset).table('keap_webhook_log');
+      await tableRef.insert([record]);
+      logger.info(
+        { paymentId: record.payment_id, eventName: record.event_name, subscriptionPlanId: record.subscription_plan_id },
+        'Webhook log row inserted'
+      );
+    } catch (error) {
+      const bqError = error as { errors?: Array<{ errors: unknown[] }> };
+      if (bqError.errors) {
+        logger.error({ errors: bqError.errors }, 'BigQuery webhook log insert errors');
+      } else {
+        logger.error({ error }, 'Failed to insert webhook log row');
+      }
     }
   }
 

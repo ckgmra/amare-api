@@ -197,6 +197,23 @@ export interface MetaQueueMetadata {
   pixelId: string;
 }
 
+// Keap webhook log record — one row per payment processed, for classification debugging
+export interface KeapWebhookLogRecord {
+  created_at: string;
+  payment_id: number;
+  contact_id: number | null;
+  brand: string | null;
+  event_name: string | null;
+  subscription_plan_id: number | null;
+  prior_order_count: number | null;
+  order_id: string | null;
+  amount: number | null;
+  currency: string | null;
+  raw_transaction_json: string | null;
+  raw_order_json: string | null;
+  classification_note: string | null;
+}
+
 // Clickbank transaction record for BigQuery (consolidated: audit log + processing queue)
 export interface ClickbankTransaction {
   id: string;
