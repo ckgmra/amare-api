@@ -632,10 +632,10 @@ class KeapClient {
   }
 
   /**
-   * Delete a REST hook subscription by event key and hook ID
+   * Delete a REST hook subscription by numeric hook key
    */
-  async deleteHook(eventKey: string, hookId: number): Promise<void> {
-    await this.axiosInstance.delete(`/hooks/${eventKey}/${hookId}`);
+  async deleteHook(hookId: number): Promise<void> {
+    await this.axiosInstance.delete(`/hooks/${hookId}`);
   }
 
   /**
