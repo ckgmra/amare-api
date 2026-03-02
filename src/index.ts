@@ -84,7 +84,18 @@ async function buildApp() {
   await fastify.register(clickbankRoutes);
   await fastify.register(keapWebhookRoutes);
 
-  // Temporary admin endpoint for creating/verifying Keap hooks
+  // Admin endpoints for managing Keap REST hooks
+  // All require X-API-Key header matching SUBSCRIBE_API_KEY
+
+  fastify.get('/admin/keap-hooks', async (request, reply) => {
+    const apiKey = request.headers['x-api-key'];
+    if (!process.env.SUBSCRIBE_API_KEY || apiKey !== process.env.SUBSCRIBE_API_KEY) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+    const result = await keapClient.listHooks();
+    return reply.send(result);
+  });
+
   fastify.post('/admin/create-hook', async (request, reply) => {
     const apiKey = request.headers['x-api-key'];
     if (!process.env.SUBSCRIBE_API_KEY || apiKey !== process.env.SUBSCRIBE_API_KEY) {
@@ -93,6 +104,16 @@ async function buildApp() {
     const { eventKey, hookUrl } = request.body as Record<string, string>;
     const result = await keapClient.createHook(eventKey, hookUrl);
     return reply.send(result);
+  });
+
+  fastify.delete('/admin/keap-hooks/:eventKey/:hookId', async (request, reply) => {
+    const apiKey = request.headers['x-api-key'];
+    if (!process.env.SUBSCRIBE_API_KEY || apiKey !== process.env.SUBSCRIBE_API_KEY) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+    const { eventKey, hookId } = request.params as Record<string, string>;
+    await keapClient.deleteHook(eventKey, Number(hookId));
+    return reply.send({ deleted: true });
   });
 
   fastify.post('/admin/verify-hook', async (request, reply) => {

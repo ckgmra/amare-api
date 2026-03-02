@@ -624,6 +624,21 @@ class KeapClient {
   }
 
   /**
+   * List all REST hook subscriptions (to check status / get IDs)
+   */
+  async listHooks(): Promise<unknown> {
+    const response = await this.axiosInstance.get('/hooks');
+    return response.data;
+  }
+
+  /**
+   * Delete a REST hook subscription by event key and hook ID
+   */
+  async deleteHook(eventKey: string, hookId: number): Promise<void> {
+    await this.axiosInstance.delete(`/hooks/${eventKey}/${hookId}`);
+  }
+
+  /**
    * Create a REST hook subscription
    */
   async createHook(eventKey: string, hookUrl: string): Promise<unknown> {
