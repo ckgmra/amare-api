@@ -203,6 +203,33 @@ async function processPayment(
   paymentId: number,
   reqLogger: typeof logger
 ): Promise<number | null> {
+  // ── Duplicate check ──
+  // Keap sometimes fires the same payment_id multiple times.
+  // Check the webhook log for a prior non-duplicate row before doing any API work.
+  const alreadyProcessed = await bigQueryClient.checkPaymentProcessed(paymentId);
+  if (alreadyProcessed) {
+    reqLogger.warn({ paymentId }, 'Duplicate payment webhook — skipping processing, logging as duplicate');
+    bigQueryClient.insertWebhookLog({
+      created_at: new Date().toISOString(),
+      payment_id: paymentId,
+      is_duplicate: true,
+      contact_id: null,
+      brand: null,
+      event_name: null,
+      subscription_plan_id: null,
+      prior_order_count: null,
+      order_id: null,
+      amount: null,
+      currency: null,
+      raw_transaction_json: null,
+      raw_order_json: null,
+      classification_note: 'duplicate_webhook',
+    }).catch(err => {
+      reqLogger.error({ err, paymentId }, 'Failed to insert duplicate webhook log');
+    });
+    return null;
+  }
+
   // Fetch the transaction/payment details from Keap
   const transaction = await keapClient.getTransaction(paymentId);
   if (!transaction) {
@@ -357,6 +384,7 @@ async function processPayment(
             bigQueryClient.insertWebhookLog({
               created_at: new Date().toISOString(),
               payment_id: paymentId,
+              is_duplicate: false,
               contact_id: contactId,
               brand,
               event_name: null,
@@ -425,6 +453,7 @@ async function processPayment(
   bigQueryClient.insertWebhookLog({
     created_at: new Date().toISOString(),
     payment_id: paymentId,
+    is_duplicate: false,
     contact_id: contactId,
     brand,
     event_name: eventName,

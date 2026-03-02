@@ -201,6 +201,7 @@ export interface MetaQueueMetadata {
 export interface KeapWebhookLogRecord {
   created_at: string;
   payment_id: number;
+  is_duplicate: boolean;        // true if Keap fired this payment_id more than once
   contact_id: number | null;
   brand: string | null;
   event_name: string | null;

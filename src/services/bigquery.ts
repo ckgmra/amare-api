@@ -450,6 +450,32 @@ class BigQueryClient {
   }
 
   /**
+   * Check whether a payment_id has already been processed (non-duplicate row exists).
+   * Used to detect Keap duplicate webhook deliveries before doing any API work.
+   * Returns true if a prior non-duplicate row exists within the last 24 hours.
+   */
+  async checkPaymentProcessed(paymentId: number): Promise<boolean> {
+    try {
+      const query = `
+        SELECT 1
+        FROM \`${this.projectId}.${this.dataset}.keap_webhook_log\`
+        WHERE payment_id = @paymentId
+          AND is_duplicate = false
+          AND created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+        LIMIT 1
+      `;
+      const [rows] = await this.client.query({
+        query,
+        params: { paymentId },
+      });
+      return rows.length > 0;
+    } catch (error) {
+      logger.warn({ error, paymentId }, 'checkPaymentProcessed query failed — assuming not duplicate');
+      return false;
+    }
+  }
+
+  /**
    * Insert a keap webhook log row for classification debugging.
    * Fire-and-forget — caller should .catch() errors.
    */
