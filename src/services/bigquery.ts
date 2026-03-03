@@ -296,14 +296,13 @@ class BigQueryClient {
     email: string | null
   ): Promise<TrackingContextRecord | null> {
     try {
-      // Step 1: Try by keap_contact_id
+      // Step 1: Try by keap_contact_id — prefer rows with pixel_id, but accept without
       if (keapContactId) {
         const query1 = `
           SELECT *
           FROM \`${this.projectId}.${this.dataset}.${this.trackingContextTable}\`
           WHERE keap_contact_id = @keapContactId
-            AND pixel_id IS NOT NULL
-          ORDER BY created_at DESC
+          ORDER BY pixel_id IS NOT NULL DESC, created_at DESC
           LIMIT 1
         `;
         const [rows1] = await this.client.query({
@@ -315,14 +314,13 @@ class BigQueryClient {
         }
       }
 
-      // Step 2: Fallback by email
+      // Step 2: Fallback by email — prefer rows with pixel_id, but accept without
       if (email) {
         const query2 = `
           SELECT *
           FROM \`${this.projectId}.${this.dataset}.${this.trackingContextTable}\`
           WHERE email = @email
-            AND pixel_id IS NOT NULL
-          ORDER BY created_at DESC
+          ORDER BY pixel_id IS NOT NULL DESC, created_at DESC
           LIMIT 1
         `;
         const [rows2] = await this.client.query({
