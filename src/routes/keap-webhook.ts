@@ -411,12 +411,16 @@ async function processPayment(
             item_price: (item.price as number) || 0,
           }));
         }
-        // Check if this order is tied to a subscription plan
-        const subPlan = order.subscription_plan as Record<string, unknown> | undefined;
-        if (subPlan?.id) {
-          subscriptionPlanId = subPlan.id as number;
-        } else {
-          classificationNote = 'no_subscription_plan';
+        // Detect recurring subscription payments via jobRecurringId in order items.
+        // Keap sets jobRecurringId > 0 on rebill items; first payments have jobRecurringId = 0.
+        // subscription_plan is not populated by Keap at the order level for rebills.
+        if (Array.isArray(items)) {
+          const recurringItem = items.find(
+            (item) => typeof item.jobRecurringId === 'number' && item.jobRecurringId > 0
+          );
+          if (recurringItem) {
+            subscriptionPlanId = recurringItem.jobRecurringId as number;
+          }
         }
       }
     } catch (err) {
@@ -424,29 +428,17 @@ async function processPayment(
     }
   }
 
-  // Determine event name: RecurringPayment if this is a subscription rebill with prior invoices,
-  // Purchase otherwise (initial payment or one-time product).
+  // Determine event name: RecurringPayment if any order item has a non-zero jobRecurringId
+  // (indicating a subscription rebill), Purchase otherwise (new subscription or one-time product).
+  // jobRecurringId > 0 is the reliable signal — subscription_plan is not populated by Keap for rebills.
   let eventName = 'Purchase';
-  let priorOrderCount: number | null = null;
-  if (subscriptionPlanId && contactId) {
-    try {
-      const contactOrders = await keapClient.getOrdersByContact(contactId, 'PAID');
-      const priorSubscriptionOrders = contactOrders.filter((o) => {
-        const sp = o.subscription_plan as Record<string, unknown> | undefined;
-        return sp?.id === subscriptionPlanId && String(o.id) !== orderId;
-      });
-      priorOrderCount = priorSubscriptionOrders.length;
-      if (priorOrderCount > 0) {
-        eventName = 'RecurringPayment';
-      }
-      reqLogger.info(
-        { contactId, subscriptionPlanId, priorCount: priorOrderCount, eventName },
-        'Subscription payment classification'
-      );
-    } catch (err) {
-      classificationNote = 'classification_error';
-      reqLogger.warn({ err, contactId, subscriptionPlanId }, 'Failed to classify subscription payment — defaulting to Purchase');
-    }
+  const priorOrderCount: number | null = null;
+  if (subscriptionPlanId) {
+    eventName = 'RecurringPayment';
+    reqLogger.info(
+      { contactId, subscriptionPlanId, eventName },
+      'Recurring subscription payment detected via jobRecurringId'
+    );
   }
 
   // Log every processed payment for classification debugging
