@@ -31,6 +31,36 @@ class BigQueryClient {
   }
 
   /**
+   * Look up product display info by ClickBank product ID.
+   * Returns the CustomerHub fulfillment_trigger_tag (human-readable name)
+   * and cc_descriptor for use on thank-you pages.
+   */
+  async getProductInfo(
+    productId: string
+  ): Promise<{ fulfillment_trigger_tag: string | null; cc_descriptor: string | null } | null> {
+    try {
+      const query = `
+        SELECT fulfillment_trigger_tag, cc_descriptor
+        FROM \`${this.projectId}.${this.dataset}.${this.productTagsTable}\`
+        WHERE clickbank_product_id = @productId
+          AND active = true
+          AND keap_tag_category = 'CustomerHub'
+          AND action = 'apply_tag'
+        LIMIT 1
+      `;
+      const [rows] = await this.client.query({ query, params: { productId } });
+      if (rows.length === 0) return null;
+      return {
+        fulfillment_trigger_tag: (rows[0].fulfillment_trigger_tag as string) || null,
+        cc_descriptor: (rows[0].cc_descriptor as string) || null,
+      };
+    } catch (error) {
+      logger.error({ error, productId }, 'Failed to get product info');
+      return null;
+    }
+  }
+
+  /**
    * Get tag actions for a product and transaction type
    *
    * Returns array of action objects where action is 'apply_tag' or 'apply_note'

@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { subscribeRoutes } from './routes/subscribe.js';
 import { clickbankRoutes } from './routes/clickbank.js';
 import { keapWebhookRoutes } from './routes/keap-webhook.js';
+import { productInfoRoutes } from './routes/product-info.js';
 import { keapClient } from './services/keap.js';
 import { bigQueryClient } from './services/bigquery.js';
 import { startReplayWorker } from './services/metaQueue.js';
@@ -83,6 +84,7 @@ async function buildApp() {
   await fastify.register(subscribeRoutes);
   await fastify.register(clickbankRoutes);
   await fastify.register(keapWebhookRoutes);
+  await fastify.register(productInfoRoutes);
 
   // Admin endpoints for managing Keap REST hooks
   // All require X-API-Key header matching SUBSCRIBE_API_KEY
