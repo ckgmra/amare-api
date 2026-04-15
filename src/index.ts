@@ -5,7 +5,7 @@ import rateLimit from '@fastify/rate-limit';
 import { v4 as uuidv4 } from 'uuid';
 
 import { subscribeRoutes } from './routes/subscribe.js';
-import { clickbankRoutes } from './routes/clickbank.js';
+import { clickbankRoutes, retryFailedTransactions } from './routes/clickbank.js';
 import { keapWebhookRoutes } from './routes/keap-webhook.js';
 import { productInfoRoutes } from './routes/product-info.js';
 import { keapClient } from './services/keap.js';
@@ -197,6 +197,13 @@ async function main() {
     // Start Meta CAPI replay worker (production only)
     if (NODE_ENV !== 'development') {
       startReplayWorker();
+    }
+
+    // Flush any pending ClickBank transactions on startup (fire-and-forget)
+    if (NODE_ENV !== 'development') {
+      retryFailedTransactions(logger).catch((err: unknown) => {
+        logger.error({ error: err }, 'Startup ClickBank retry failed');
+      });
     }
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : 'Unknown error';

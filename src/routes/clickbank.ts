@@ -410,10 +410,10 @@ async function processQueuedTransaction(
 const retryInFlight = new Set<string>();
 
 /**
- * Retry failed transactions (triggered by new IPNs)
+ * Retry failed transactions (triggered by new IPNs or startup)
  */
-async function retryFailedTransactions(reqLogger: Logger): Promise<void> {
-  const unprocessed = await bigQueryClient.getUnprocessedTransactions(10);
+export async function retryFailedTransactions(reqLogger: Logger): Promise<void> {
+  const unprocessed = await bigQueryClient.getUnprocessedTransactions(100);
 
   if (unprocessed.length === 0) {
     return;
