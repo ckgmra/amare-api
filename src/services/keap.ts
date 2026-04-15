@@ -75,29 +75,34 @@ class KeapClient {
   }
 
   /**
-   * Save new refresh token to Secret Manager
-   * Keap refresh tokens are single-use - each refresh returns a new one
+   * Save new refresh token to Secret Manager with retries.
+   * Keap refresh tokens are single-use - if this save fails and the process
+   * restarts, the token in Secret Manager will be stale and all Keap calls
+   * will fail until manual re-authorization.
    */
   private async saveRefreshToken(newToken: string): Promise<void> {
-    try {
-      const secretName = `projects/${this.projectId}/secrets/KEAP_REFRESH_TOKEN`;
+    const secretName = `projects/${this.projectId}/secrets/KEAP_REFRESH_TOKEN`;
+    const maxAttempts = 3;
 
-      // Add a new version with the new refresh token
-      await this.secretManagerClient.addSecretVersion({
-        parent: secretName,
-        payload: {
-          data: Buffer.from(newToken, 'utf8'),
-        },
-      });
-
-      // Update our in-memory copy
-      this.currentRefreshToken = newToken;
-
-      logger.info('Saved new Keap refresh token to Secret Manager');
-    } catch (error) {
-      // Log but don't throw - the current request can still succeed
-      // Next request will fail though if we don't have the new token
-      logger.error({ error }, 'Failed to save new refresh token to Secret Manager');
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.secretManagerClient.addSecretVersion({
+          parent: secretName,
+          payload: { data: Buffer.from(newToken, 'utf8') },
+        });
+        this.currentRefreshToken = newToken;
+        logger.info('Saved new Keap refresh token to Secret Manager');
+        return;
+      } catch (error) {
+        if (attempt < maxAttempts) {
+          logger.warn({ error, attempt }, 'Failed to save refresh token, retrying...');
+          await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+        } else {
+          // CRITICAL: if this token is lost, all Keap API calls will fail on
+          // next cold start and manual OAuth re-authorization will be required.
+          logger.error({ error }, 'CRITICAL: Failed to save Keap refresh token to Secret Manager after all retries — manual re-auth will be required if this process restarts');
+        }
+      }
     }
   }
 
