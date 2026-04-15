@@ -405,6 +405,10 @@ async function processQueuedTransaction(
   await bigQueryClient.updateTransactionStatus(id, contactId, tagsApplied, tagsRemoved, errorMessage);
 }
 
+// Track transaction IDs currently being retried to prevent duplicate processing
+// when multiple IPNs arrive before the results table streaming buffer is visible.
+const retryInFlight = new Set<string>();
+
 /**
  * Retry failed transactions (triggered by new IPNs)
  */
@@ -415,10 +419,22 @@ async function retryFailedTransactions(reqLogger: Logger): Promise<void> {
     return;
   }
 
-  reqLogger.info({ count: unprocessed.length }, 'Retrying unprocessed transactions');
+  // Filter out any already being processed by a concurrent retry cycle
+  const toRetry = unprocessed.filter(t => !retryInFlight.has(t.id));
 
-  for (const transaction of unprocessed) {
-    reqLogger.info({ transactionId: transaction.id, receipt: transaction.receipt }, 'Retrying transaction');
-    await processQueuedTransaction(reqLogger, transaction);
+  if (toRetry.length === 0) {
+    return;
+  }
+
+  reqLogger.info({ count: toRetry.length }, 'Retrying unprocessed transactions');
+
+  for (const transaction of toRetry) {
+    retryInFlight.add(transaction.id);
+    try {
+      reqLogger.info({ transactionId: transaction.id, receipt: transaction.receipt }, 'Retrying transaction');
+      await processQueuedTransaction(reqLogger, transaction);
+    } finally {
+      retryInFlight.delete(transaction.id);
+    }
   }
 }
