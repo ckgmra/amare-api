@@ -1,5 +1,5 @@
 import { BigQuery } from '@google-cloud/bigquery';
-import type { TagAction, ClickbankTransaction, SubscriberQueueEntry, TrackingContextRecord, MetaQueueRecord, KeapWebhookLogRecord } from '../types/index.js';
+import type { TagAction, ClickbankTransaction, ClickbankTransactionResult, SubscriberQueueEntry, TrackingContextRecord, MetaQueueRecord, KeapWebhookLogRecord } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 class BigQueryClient {
@@ -12,6 +12,7 @@ class BigQueryClient {
   private subscriberResultsTable: string;
   private trackingContextTable: string;
   private metaCapiQueueTable: string;
+  private transactionResultsTable: string;
 
   constructor() {
     this.projectId = process.env.GCP_PROJECT_ID || 'watchful-force-477418-b9';
@@ -24,6 +25,7 @@ class BigQueryClient {
     this.subscriberResultsTable = 'subscriber_processing_results';
     this.trackingContextTable = 'tracking_context';
     this.metaCapiQueueTable = 'meta_capi_queue';
+    this.transactionResultsTable = 'clickbank_transaction_results';
 
     this.client = new BigQuery({
       projectId: this.projectId,
@@ -236,15 +238,21 @@ class BigQueryClient {
   }
 
   /**
-   * Get unprocessed transactions for retry processing
+   * Get unprocessed transactions for retry processing.
+   * Uses LEFT JOIN against clickbank_transaction_results (append-only) to avoid
+   * BigQuery streaming buffer limitation that prevents DML UPDATE on recently
+   * inserted rows.
    */
   async getUnprocessedTransactions(limit: number = 100): Promise<ClickbankTransaction[]> {
     try {
       const query = `
-        SELECT *
-        FROM \`${this.projectId}.${this.dataset}.${this.transactionsTable}\`
-        WHERE is_processed = false
-        ORDER BY created_at ASC
+        SELECT t.*
+        FROM \`${this.projectId}.${this.dataset}.${this.transactionsTable}\` t
+        LEFT JOIN \`${this.projectId}.${this.dataset}.${this.transactionResultsTable}\` r
+          ON t.id = r.transaction_id
+        WHERE t.processing_status = 'PENDING'
+          AND r.transaction_id IS NULL
+        ORDER BY t.created_at ASC
         LIMIT @limit
       `;
 
@@ -261,7 +269,10 @@ class BigQueryClient {
   }
 
   /**
-   * Update transaction status after processing
+   * Record transaction processing result as an append-only row.
+   * Avoids BigQuery streaming buffer limitation (DML UPDATE fails on recently
+   * streamed rows). getUnprocessedTransactions LEFT JOINs this table to
+   * exclude completed transactions.
    */
   async updateTransactionStatus(
     id: string,
@@ -271,28 +282,22 @@ class BigQueryClient {
     error: string | null
   ): Promise<void> {
     try {
-      const query = `
-        UPDATE \`${this.projectId}.${this.dataset}.${this.transactionsTable}\`
-        SET is_processed = true,
-            keap_contact_id = @keapContactId,
-            tags_applied = @tagsApplied,
-            tags_removed = @tagsRemoved,
-            processing_status = @status,
-            error_message = @error,
-            processed_at = CURRENT_TIMESTAMP()
-        WHERE id = @id
-      `;
+      const result: ClickbankTransactionResult = {
+        transaction_id: id,
+        keap_contact_id: keapContactId,
+        tags_applied: tagsApplied,
+        tags_removed: tagsRemoved,
+        processing_status: error ? 'FAILED' : 'SUCCESS',
+        error_message: error,
+        processed_at: new Date().toISOString(),
+      };
 
-      const status = error ? 'FAILED' : 'SUCCESS';
+      const tableRef = this.client.dataset(this.dataset).table(this.transactionResultsTable);
+      await tableRef.insert([result]);
 
-      await this.client.query({
-        query,
-        params: { id, keapContactId, tagsApplied, tagsRemoved, status, error },
-      });
-
-      logger.info({ id, keapContactId, success: !error }, 'Transaction status updated');
+      logger.info({ id, keapContactId, success: !error }, 'Transaction result recorded');
     } catch (err) {
-      logger.error({ error: err, id }, 'Failed to update transaction status');
+      logger.error({ error: err, id }, 'Failed to record transaction result');
     }
   }
 

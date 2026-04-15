@@ -215,6 +215,17 @@ export interface KeapWebhookLogRecord {
   classification_note: string | null;
 }
 
+// Result record inserted into clickbank_transaction_results after processing
+export interface ClickbankTransactionResult {
+  transaction_id: string;
+  keap_contact_id: number | null;
+  tags_applied: number[];
+  tags_removed: number[];
+  processing_status: 'SUCCESS' | 'FAILED';
+  error_message: string | null;
+  processed_at: string;
+}
+
 // Clickbank transaction record for BigQuery (consolidated: audit log + processing queue)
 export interface ClickbankTransaction {
   id: string;
