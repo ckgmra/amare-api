@@ -53,6 +53,28 @@ class KeapClient {
   }
 
   /**
+   * Load the latest refresh token directly from Secret Manager.
+   * Used on fresh instances where the env var may be stale due to
+   * another instance having already rotated the token.
+   */
+  private async loadRefreshTokenFromSecretManager(): Promise<string | null> {
+    try {
+      const secretName = `projects/${this.projectId}/secrets/KEAP_REFRESH_TOKEN/versions/latest`;
+      const [version] = await this.secretManagerClient.accessSecretVersion({ name: secretName });
+      const token = version.payload?.data?.toString();
+      if (token) {
+        this.currentRefreshToken = token;
+        logger.info('Loaded latest Keap refresh token from Secret Manager');
+        return token;
+      }
+      return null;
+    } catch (error) {
+      logger.error({ error }, 'Failed to load refresh token from Secret Manager');
+      return null;
+    }
+  }
+
+  /**
    * Save new refresh token to Secret Manager
    * Keap refresh tokens are single-use - each refresh returns a new one
    */
@@ -79,6 +101,33 @@ class KeapClient {
     }
   }
 
+  private async doTokenRefresh(refreshToken: string, clientId: string, clientSecret: string): Promise<KeapTokenResponse> {
+    const now = Date.now();
+    const response = await axios.post<KeapTokenResponse>(
+      KEAP_TOKEN_URL,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+      }).toString(),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+        },
+      }
+    );
+
+    this.accessToken = response.data.access_token;
+    this.tokenExpiry = now + response.data.expires_in * 1000;
+
+    if (response.data.refresh_token && response.data.refresh_token !== refreshToken) {
+      await this.saveRefreshToken(response.data.refresh_token);
+    }
+
+    logger.info('Keap access token refreshed');
+    return response.data;
+  }
+
   async getAccessToken(): Promise<string> {
     const now = Date.now();
 
@@ -88,41 +137,42 @@ class KeapClient {
 
     const clientId = process.env.KEAP_CLIENT_ID;
     const clientSecret = process.env.KEAP_CLIENT_SECRET;
-    // Use in-memory token if we have one (from previous refresh), else use env var
-    const refreshToken = this.currentRefreshToken || process.env.KEAP_REFRESH_TOKEN;
 
-    if (!clientId || !clientSecret || !refreshToken) {
+    if (!clientId || !clientSecret) {
       throw new Error('Missing Keap OAuth credentials');
     }
 
+    // Always prefer Secret Manager over the env var on first use —
+    // the env var is baked in at container start and may be stale if
+    // another Cloud Run instance has already rotated the token.
+    if (!this.currentRefreshToken) {
+      await this.loadRefreshTokenFromSecretManager();
+    }
+
+    const refreshToken = this.currentRefreshToken || process.env.KEAP_REFRESH_TOKEN;
+    if (!refreshToken) {
+      throw new Error('Missing Keap refresh token');
+    }
+
     try {
-      const response = await axios.post<KeapTokenResponse>(
-        KEAP_TOKEN_URL,
-        new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-        }).toString(),
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
-          },
-        }
-      );
-
-      this.accessToken = response.data.access_token;
-      this.tokenExpiry = now + response.data.expires_in * 1000;
-
-      // IMPORTANT: Save the new refresh token - Keap tokens are single-use!
-      if (response.data.refresh_token && response.data.refresh_token !== refreshToken) {
-        await this.saveRefreshToken(response.data.refresh_token);
+      await this.doTokenRefresh(refreshToken, clientId, clientSecret);
+      return this.accessToken!;
+    } catch (firstError) {
+      // If the refresh failed, the token in memory may already be stale
+      // (rotated by another instance). Re-read Secret Manager and retry once.
+      logger.warn({ firstError }, 'Keap token refresh failed — reloading from Secret Manager and retrying');
+      const latestToken = await this.loadRefreshTokenFromSecretManager();
+      if (!latestToken || latestToken === refreshToken) {
+        logger.error({ firstError }, 'Failed to refresh Keap access token');
+        throw new Error('Failed to refresh Keap access token');
       }
-
-      logger.info('Keap access token refreshed');
-      return this.accessToken;
-    } catch (error) {
-      logger.error({ error }, 'Failed to refresh Keap access token');
-      throw new Error('Failed to refresh Keap access token');
+      try {
+        await this.doTokenRefresh(latestToken, clientId, clientSecret);
+        return this.accessToken!;
+      } catch (retryError) {
+        logger.error({ retryError }, 'Failed to refresh Keap access token after Secret Manager retry');
+        throw new Error('Failed to refresh Keap access token');
+      }
     }
   }
 
